@@ -1,7 +1,7 @@
 // Интерфейс, голос (распознавание и синтез речи Android), сессии, настройки.
 const $ = s => document.querySelector(s);
 const chatEl = $('#chat');
-const DEFAULTS = { apiKey: '', model: 'claude-sonnet-4-5', baseUrl: '', voiceURI: '', rate: 1.1, autoListen: false, maxHistory: 40 };
+const DEFAULTS = { apiKey: '', workspaceId: '', model: 'claude-sonnet-4-5', baseUrl: '', voiceURI: '', rate: 1.1, autoListen: false, maxHistory: 40 };
 let settings = { ...DEFAULTS };
 let session = null;
 let brain = null;
@@ -323,6 +323,7 @@ $('#kbFile').onchange = async e => {
 
 function renderSettings() {
   $('#setKey').value = settings.apiKey;
+  $('#setWs').value = settings.workspaceId || '';
   $('#setModel').value = settings.model;
   $('#setBase').value = settings.baseUrl;
   $('#setRate').value = settings.rate;
@@ -343,6 +344,7 @@ speechSynthesis.onvoiceschanged = () => { if ($('#sheet-settings').classList.con
 $('#setRate').oninput = e => $('#rateVal').textContent = e.target.value;
 function readSettingsForm() {
   settings.apiKey = $('#setKey').value.trim();
+  settings.workspaceId = $('#setWs').value.trim();
   settings.model = $('#setModel').value.trim() || DEFAULTS.model;
   settings.baseUrl = $('#setBase').value.trim();
   settings.voiceURI = $('#setVoice').value;

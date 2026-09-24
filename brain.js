@@ -78,12 +78,14 @@ class Brain {
     return base + '/v1/messages';
   }
   headers() {
-    return {
+    const h = {
       'content-type': 'application/json',
       'x-api-key': this.settings.apiKey,
       'anthropic-version': '2023-06-01',
       'anthropic-dangerous-direct-browser-access': 'true',
     };
+    if (this.settings.workspaceId) h['anthropic-workspace-id'] = this.settings.workspaceId;
+    return h;
   }
 
   runTool(name, a) {
@@ -244,6 +246,7 @@ function explainHttp(status, msg) {
     429: 'Слишком много запросов или закончился баланс.',
     529: 'Сервер Claude перегружен, повторите через минуту.',
   }[status];
+  if (/workspace/i.test(String(msg))) return 'Ключ создан вне рабочего пространства. Создайте новый ключ внутри workspace (Console → Settings → Workspaces → нужное пространство → API keys) или впишите ID пространства в настройках. (' + msg + ')';
   return (hint ? hint + ' ' : '') + '(' + msg + ')';
 }
 
