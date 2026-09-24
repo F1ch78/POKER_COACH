@@ -131,8 +131,14 @@
   <input id="setModel" list="models">
   <datalist id="models"><option value="claude-sonnet-4-5"><option value="claude-haiku-4-5"></datalist>
   <div class="hint">Sonnet умнее, Haiku быстрее и дешевле.</div>
-  <label class="f">Адрес прокси для API (необязательно)</label>
-  <input id="setBase" placeholder="https://api.anthropic.com">
+  <label class="f">Адрес API (пусто — напрямую в Anthropic)</label>
+  <input id="setBase" placeholder="https://api.anthropic.com" autocomplete="off" autocapitalize="off">
+  <label class="f">Формат API</label>
+  <select id="setFormat">
+    <option value="auto">Авто (определить при проверке связи)</option>
+    <option value="anthropic">Anthropic (/v1/messages)</option>
+    <option value="openai">OpenAI-совместимый (/v1/chat/completions)</option>
+  </select>
   <label class="f">Голос</label>
   <select id="setVoice"></select>
   <label class="f">Скорость речи: <span id="rateVal"></span></label>
