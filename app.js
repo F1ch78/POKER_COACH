@@ -1,7 +1,7 @@
 // Интерфейс, голос (распознавание и синтез речи Android), сессии, настройки.
 const $ = s => document.querySelector(s);
 const chatEl = $('#chat');
-const DEFAULTS = { apiKey: '', workspaceId: '', apiFormat: 'auto', model: 'claude-sonnet-4-5', baseUrl: '', voiceURI: '', rate: 1.1, autoListen: false, maxHistory: 40 };
+const DEFAULTS = { apiKey: '', workspaceId: '', model: 'claude-sonnet-4-5', baseUrl: '', voiceURI: '', rate: 1.1, autoListen: false, maxHistory: 40 };
 let settings = { ...DEFAULTS };
 let session = null;
 let brain = null;
@@ -148,7 +148,7 @@ async function handle(text) {
     if (!bubble.textContent.trim()) bubble.remove();
   } catch (e) {
     if (!bubble.textContent.trim()) bubble.remove();
-    const msg = e.message;
+    const msg = e.name === 'TypeError' ? 'Нет связи с сервером Claude. Проверьте интернет; в России обычно нужен включённый VPN.' : e.message;
     sys('Ошибка: ' + msg);
   } finally {
     busy = false;
@@ -326,7 +326,6 @@ function renderSettings() {
   $('#setWs').value = settings.workspaceId || '';
   $('#setModel').value = settings.model;
   $('#setBase').value = settings.baseUrl;
-  $('#setFormat').value = settings.apiFormat || 'auto';
   $('#setRate').value = settings.rate;
   $('#rateVal').textContent = settings.rate;
   fillVoices();
@@ -348,7 +347,6 @@ function readSettingsForm() {
   settings.workspaceId = $('#setWs').value.trim();
   settings.model = $('#setModel').value.trim() || DEFAULTS.model;
   settings.baseUrl = $('#setBase').value.trim();
-  settings.apiFormat = $('#setFormat').value;
   settings.voiceURI = $('#setVoice').value;
   settings.rate = +$('#setRate').value;
 }
@@ -363,13 +361,8 @@ $('#testVoice').onclick = () => { readSettingsForm(); Speech.stop(); Speech.say(
 $('#testApi').onclick = async () => {
   readSettingsForm();
   $('#setStatus').textContent = 'Проверяю…';
-  try {
-    const fmt = await brain.ping();
-    settings.apiFormat = fmt;
-    $('#setFormat').value = fmt;
-    await DB.put('kv', settings, 'settings');
-    $('#setStatus').textContent = '✅ Связь есть. Формат: ' + (fmt === 'openai' ? 'OpenAI-совместимый' : 'Anthropic') + '. Настройки сохранены.';
-  } catch (e) { $('#setStatus').textContent = '❌ ' + e.message; }
+  try { await brain.ping(); $('#setStatus').textContent = '✅ Связь с Claude есть'; }
+  catch (e) { $('#setStatus').textContent = '❌ ' + (e.name === 'TypeError' ? 'Нет связи с сервером. В России обычно нужен VPN.' : e.message); }
 };
 
 // ================================================================ экран не гаснет во время разбора
