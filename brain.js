@@ -73,11 +73,23 @@ class Brain {
     this.abort = null;
   }
 
-  url() {
-    const base = (this.settings.baseUrl || 'https://api.anthropic.com').replace(/\/+$/, '');
-    return base + '/v1/messages';
+  // ---------------------------------------------------------------- подключение
+  // Адрес можно вписывать и с /v1 на конце, и без.
+  root() {
+    return (this.settings.baseUrl || 'https://api.anthropic.com').trim().replace(/\/+$/, '').replace(/\/v1$/, '');
   }
-  headers() {
+  fmt() {
+    // anthropic | openai; 'auto' уточняется при первом запросе
+    const f = this.settings.apiFormat || 'auto';
+    return f === 'auto' ? (this._detected || 'anthropic') : f;
+  }
+  url(fmt) {
+    return this.root() + (fmt === 'openai' ? '/v1/chat/completions' : '/v1/messages');
+  }
+  headers(fmt) {
+    if (fmt === 'openai') {
+      return { 'content-type': 'application/json', 'authorization': 'Bearer ' + this.settings.apiKey };
+    }
     const h = {
       'content-type': 'application/json',
       'x-api-key': this.settings.apiKey,
@@ -117,65 +129,164 @@ class Brain {
     return parts.join('\n');
   }
 
-  // Один потоковый запрос. Возвращает {content, stop_reason}
-  async streamOnce(body, onText) {
+  // Преобразование диалога (внутри храним в формате Anthropic) в формат OpenAI
+  toOpenAI(body) {
+    const msgs = [];
+    if (body.system) msgs.push({ role: 'system', content: body.system });
+    for (const m of body.messages) {
+      if (typeof m.content === 'string') { msgs.push({ role: m.role, content: m.content }); continue; }
+      if (m.role === 'assistant') {
+        const text = m.content.filter(b => b.type === 'text').map(b => b.text).join('');
+        const calls = m.content.filter(b => b.type === 'tool_use').map(b => ({
+          id: b.id, type: 'function', function: { name: b.name, arguments: JSON.stringify(b.input || {}) } }));
+        const o = { role: 'assistant', content: text || null };
+        if (calls.length) o.tool_calls = calls;
+        msgs.push(o);
+      } else {
+        for (const b of m.content) {
+          if (b.type === 'tool_result') msgs.push({ role: 'tool', tool_call_id: b.tool_use_id, content: b.content });
+          else if (b.type === 'text') msgs.push({ role: 'user', content: b.text });
+        }
+      }
+    }
+    const o = { model: body.model, max_tokens: body.max_tokens, messages: msgs, stream: true };
+    if (body.tools) o.tools = body.tools.map(t => ({ type: 'function',
+      function: { name: t.name, description: t.description, parameters: t.input_schema } }));
+    return o;
+  }
+
+  async request(fmt, body) {
     this.abort = new AbortController();
-    const resp = await fetch(this.url(), {
-      method: 'POST', headers: this.headers(), signal: this.abort.signal,
-      body: JSON.stringify(Object.assign({}, body, { stream: true })),
-    });
+    let resp;
+    try {
+      resp = await fetch(this.url(fmt), {
+        method: 'POST', headers: this.headers(fmt), signal: this.abort.signal,
+        body: JSON.stringify(fmt === 'openai' ? this.toOpenAI(body) : Object.assign({}, body, { stream: true })),
+      });
+    } catch (e) {
+      const err = new Error(this.settings.baseUrl
+        ? 'Нет связи с сервером ' + this.root() + '. Проверьте адрес и интернет/VPN. Если адрес верный — сервер, возможно, не принимает запросы из браузера.'
+        : 'Нет связи с сервером Claude. Проверьте интернет; в России обычно нужен включённый VPN.');
+      err.network = true;
+      throw err;
+    }
     if (!resp.ok) {
       let msg = resp.status + ' ' + resp.statusText;
-      try { const j = await resp.json(); msg = (j.error && j.error.message) || msg; } catch (e) {}
-      throw new Error(explainHttp(resp.status, msg));
+      try { const j = await resp.json(); msg = (j.error && (j.error.message || j.error)) || j.message || msg; } catch (e) {}
+      const err = new Error(explainHttp(resp.status, typeof msg === 'string' ? msg : JSON.stringify(msg)));
+      err.status = resp.status;
+      throw err;
     }
+    return resp;
+  }
+
+  async *sseEvents(resp) {
     const reader = resp.body.getReader();
     const dec = new TextDecoder();
     let buf = '';
-    const blocks = [];
-    let stop = null;
     for (;;) {
       const { done, value } = await reader.read();
       if (done) break;
-      buf += dec.decode(value, { stream: true });
+      buf += dec.decode(value, { stream: true }).replace(/\r\n/g, '\n');
       let i;
       while ((i = buf.indexOf('\n\n')) >= 0) {
         const raw = buf.slice(0, i);
         buf = buf.slice(i + 2);
-        const dataLine = raw.split('\n').find(l => l.startsWith('data:'));
-        if (!dataLine) continue;
-        let ev;
-        try { ev = JSON.parse(dataLine.slice(5).trim()); } catch (e) { continue; }
-        switch (ev.type) {
-          case 'content_block_start': {
-            const b = ev.content_block;
-            blocks[ev.index] = b.type === 'tool_use' ? { type: 'tool_use', id: b.id, name: b.name, input: {}, _json: '' }
-              : { type: 'text', text: b.text || '' };
-            break;
-          }
-          case 'content_block_delta': {
-            const b = blocks[ev.index];
-            if (ev.delta.type === 'text_delta') { b.text += ev.delta.text; onText(ev.delta.text); }
-            else if (ev.delta.type === 'input_json_delta') b._json += ev.delta.partial_json;
-            break;
-          }
-          case 'content_block_stop': {
-            const b = blocks[ev.index];
-            if (b && b.type === 'tool_use') {
-              try { b.input = b._json ? JSON.parse(b._json) : {}; } catch (e) { b.input = {}; }
-              delete b._json;
-            }
-            break;
-          }
-          case 'message_delta':
-            if (ev.delta && ev.delta.stop_reason) stop = ev.delta.stop_reason;
-            break;
-          case 'error':
-            throw new Error((ev.error && ev.error.message) || 'Ошибка потока');
+        const data = raw.split('\n').filter(l => l.startsWith('data:')).map(l => l.slice(5).trim()).join('');
+        if (!data || data === '[DONE]') continue;
+        try { yield JSON.parse(data); } catch (e) { /* пропускаем */ }
+      }
+    }
+  }
+
+  // Один потоковый запрос. Возвращает {content, stop_reason} в формате Anthropic.
+  async streamOnce(body, onText) {
+    let fmt = this.fmt();
+    let resp;
+    try {
+      resp = await this.request(fmt, body);
+    } catch (e) {
+      // автоопределение: сервер не знает формат Anthropic — пробуем OpenAI
+      if ((this.settings.apiFormat || 'auto') === 'auto' && !this._detected && (e.status === 404 || e.status === 405 || e.status === 400)) {
+        fmt = 'openai';
+        resp = await this.request(fmt, body);
+      } else throw e;
+    }
+    if ((this.settings.apiFormat || 'auto') === 'auto') this._detected = fmt;
+    return fmt === 'openai' ? this.parseOpenAI(resp, onText) : this.parseAnthropic(resp, onText);
+  }
+
+  async parseAnthropic(resp, onText) {
+    const blocks = [];
+    let stop = null;
+    for await (const ev of this.sseEvents(resp)) {
+      switch (ev.type) {
+        case 'content_block_start': {
+          const b = ev.content_block;
+          blocks[ev.index] = b.type === 'tool_use' ? { type: 'tool_use', id: b.id, name: b.name, input: {}, _json: '' }
+            : { type: 'text', text: b.text || '' };
+          break;
         }
+        case 'content_block_delta': {
+          const b = blocks[ev.index];
+          if (!b) break;
+          if (ev.delta.type === 'text_delta') { b.text += ev.delta.text; onText(ev.delta.text); }
+          else if (ev.delta.type === 'input_json_delta') b._json += ev.delta.partial_json;
+          break;
+        }
+        case 'content_block_stop': {
+          const b = blocks[ev.index];
+          if (b && b.type === 'tool_use') {
+            try { b.input = b._json ? JSON.parse(b._json) : {}; } catch (e) { b.input = {}; }
+            delete b._json;
+          }
+          break;
+        }
+        case 'message_delta':
+          if (ev.delta && ev.delta.stop_reason) stop = ev.delta.stop_reason;
+          break;
+        case 'error':
+          throw new Error((ev.error && ev.error.message) || 'Ошибка потока');
       }
     }
     return { content: blocks.filter(Boolean), stop_reason: stop };
+  }
+
+  async parseOpenAI(resp, onText) {
+    let text = '';
+    const calls = [];
+    let finish = null;
+    for await (const ev of this.sseEvents(resp)) {
+      if (ev.error) throw new Error(ev.error.message || JSON.stringify(ev.error));
+      const ch = ev.choices && ev.choices[0];
+      if (!ch) continue;
+      const d = ch.delta || {};
+      if (d.content) { text += d.content; onText(d.content); }
+      for (const tc of d.tool_calls || []) {
+        const k = tc.index !== undefined ? tc.index : calls.length;
+        const c = calls[k] || (calls[k] = { id: '', name: '', args: '' });
+        if (tc.id) c.id = tc.id;
+        if (tc.function && tc.function.name) c.name += tc.function.name;
+        if (tc.function && tc.function.arguments) c.args += tc.function.arguments;
+      }
+      if (ch.finish_reason) finish = ch.finish_reason;
+    }
+    const content = [];
+    if (text) content.push({ type: 'text', text });
+    calls.filter(Boolean).forEach((c, i) => {
+      let input = {};
+      try { input = c.args ? JSON.parse(c.args) : {}; } catch (e) {}
+      content.push({ type: 'tool_use', id: c.id || 'call_' + i, name: c.name, input });
+    });
+    const hasCalls = content.some(b => b.type === 'tool_use');
+    return { content, stop_reason: hasCalls || finish === 'tool_calls' ? 'tool_use' : 'end_turn' };
+  }
+
+  async complete(prompt, maxTokens) {
+    let out = '';
+    await this.streamOnce({ model: this.settings.model, max_tokens: maxTokens,
+      messages: [{ role: 'user', content: prompt }] }, t => { out += t; });
+    return out;
   }
 
   async compress() {
@@ -187,13 +298,7 @@ class Brain {
     const old = hist.slice(0, cut);
     const text = old.map(m => (m.role === 'user' ? 'Ученик: ' : 'Тренер: ') + m.content).join('\n');
     try {
-      const r = await fetch(this.url(), { method: 'POST', headers: this.headers(), body: JSON.stringify({
-        model: this.settings.model, max_tokens: 600,
-        messages: [{ role: 'user', content: 'Сожми разбор покерной сессии в выжимку до 150 слов: ключевые выводы по раздачам, ошибки ученика, договорённости. Предыдущая выжимка: ' + (this.session.data.summary || 'нет') + '\n\nНовый фрагмент:\n' + text }],
-      }) });
-      const j = await r.json();
-      if (!r.ok) throw new Error(j.error && j.error.message);
-      this.session.data.summary = j.content.filter(b => b.type === 'text').map(b => b.text).join('');
+      this.session.data.summary = await this.complete('Сожми разбор покерной сессии в выжимку до 150 слов: ключевые выводы по раздачам, ошибки ученика, договорённости. Предыдущая выжимка: ' + (this.session.data.summary || 'нет') + '\n\nНовый фрагмент:\n' + text, 600);
       this.session.data.history = hist.slice(cut);
       await this.session.save();
     } catch (e) { this.onLog('Не удалось сжать историю: ' + e.message); }
@@ -226,15 +331,11 @@ class Brain {
     return answer;
   }
 
+  // Проверка связи; возвращает найденный формат API
   async ping() {
-    const r = await fetch(this.url(), { method: 'POST', headers: this.headers(),
-      body: JSON.stringify({ model: this.settings.model, max_tokens: 5, messages: [{ role: 'user', content: 'Скажи: ок' }] }) });
-    if (!r.ok) {
-      let msg = r.status;
-      try { const j = await r.json(); msg = j.error && j.error.message || msg; } catch (e) {}
-      throw new Error(explainHttp(r.status, msg));
-    }
-    return true;
+    this._detected = null;
+    await this.complete('Ответь одним словом: ок', 10);
+    return this.fmt();
   }
 }
 
@@ -242,7 +343,7 @@ function explainHttp(status, msg) {
   const hint = {
     401: 'Неверный API-ключ.',
     403: 'Доступ запрещён — возможно, API недоступен из вашего региона без VPN.',
-    404: 'Не найдена модель — проверьте название модели в настройках.',
+    404: 'Не найдено — проверьте адрес API и название модели в настройках.',
     429: 'Слишком много запросов или закончился баланс.',
     529: 'Сервер Claude перегружен, повторите через минуту.',
   }[status];
