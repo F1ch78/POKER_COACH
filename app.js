@@ -242,14 +242,14 @@ function syncCardFromTour(st) {
   const t = {};
   if (st.tournamentLeft) t.players = st.tournamentLeft;
   if (st.blinds) t.blinds = `${st.blinds.sb}/${st.blinds.bb}`;
-  if (st.ante) t.ante = String(st.ante);
+  if (st.ante) t.ante = TourEngine.fmt(st.ante) + ' BB';
   const me = st.seats[0];
-  if (me && me.stack != null) t.hero_stack = String(me.stack);
+  if (me && me.stack != null) t.hero_stack = TourEngine.fmt(me.stack) + ' BB';
   if (Object.keys(t).length) session.updateTournament(t);
   if (st.hand) {
     const pos = E.positions(st).bySeat[1];
     const pre = st.hand.actions.map(a => `игрок ${a.seat} ${E.ACT_RU[a.act]}${a.amount ? ' ' + a.amount : ''}`).join(', ');
-    const f = { hero_position: pos, hero_cards: st.hand.cards, hero_stack: me && me.stack != null ? String(me.stack) : undefined,
+    const f = { hero_position: pos, hero_cards: st.hand.cards, hero_stack: me && me.stack != null ? E.fmt(me.stack) + ' BB' : undefined,
       blinds: t.blinds, preflop: pre || undefined, summary: `${pos || ''} ${st.hand.cards}`.trim() };
     if (st.hand.cardId) f.hand_id = st.hand.cardId;
     st.hand.cardId = session.upsertHand(f).hand.id;
@@ -257,23 +257,83 @@ function syncCardFromTour(st) {
   brain.onCardChanged();
 }
 
-function tourTableHtml(st) {
+// ---------------------------------------------------------------- визуальный стол
+// Показывает ровно то состояние, которое уходит нейросети: позиции, блайнды, ставки, банк.
+// Позиции и баттон меняются только при новой раздаче (когда названы карты), ставки — по ходу раунда.
+const SUIT_RED = { s: false, o: true };
+function miniCards(code) {
+  if (!code) return '<div class="tt-wait">ждём карты</div>';
+  const r = c => c === 'T' ? '10' : c;
+  const second = code[2] === 's' ? '♠' : '♥';
+  return `<div class="tt-cards"><span class="cd">${r(code[0])}<em>♠</em></span>` +
+    `<span class="cd${second === '♥' ? ' red' : ''}">${r(code[1])}<em>${second}</em></span></div>`;
+}
+
+let ttLastHand = null;
+function renderTourTable() {
   const E = window.TourEngine;
-  if (!st || !st.seats || !st.seats.length)
-    return '<div class="hint">Для начала скажите: «Турнир на 18, за столом 6, я на баттоне, у меня 1500, блайнды 50 на 100»</div>';
+  const bar = $('#tourBar');
+  const st = session.data.tour;
+  if (!st || !st.seats || !st.seats.length) {
+    bar.innerHTML = '<div class="hint">Для начала скажите: «Турнир на 18, за столом 6, я на баттоне, у меня 15». Стеки — в больших блайндах.</div>';
+    ttLastHand = null;
+    return;
+  }
+  if (!bar.querySelector('.tt')) {
+    bar.innerHTML = `<div class="tt-head"><span id="ttTitle"></span>
+        <button id="ttSeeBtn" title="Что видит нейросеть">👁</button><button id="ttFold" title="Свернуть">▾</button></div>
+      <div class="tt"><div class="tt-felt"></div><div id="ttLayer"></div><i id="ttD">D</i></div>
+      <pre id="ttSee"></pre>`;
+    $('#ttSeeBtn').onclick = () => { settings.tableSee = !settings.tableSee; DB.put('kv', settings, 'settings'); renderTourTable(); };
+    $('#ttFold').onclick = () => { settings.tableFolded = !settings.tableFolded; DB.put('kv', settings, 'settings'); renderTourTable(); };
+  }
   const p = E.positions(st);
+  const m = E.tableMoney(st);
   const acted = {};
   (st.hand ? st.hand.actions : []).forEach(a => { acted[a.seat] = a; });
-  const head = [st.hand ? `Раздача ${st.handNo}: ${st.hand.cards}` : 'Ждём карты',
-    st.blinds ? `блайнды ${st.blinds.sb}/${st.blinds.bb}` : 'блайнды не названы',
+  const newHand = ttLastHand !== st.handNo;
+  ttLastHand = st.handNo;
+
+  $('#ttTitle').textContent = [st.hand ? `Раздача ${st.handNo}` : 'До первой раздачи',
+    'стеки в BB', st.ante ? `анте ${E.fmt(st.ante)}` : '', st.blinds ? `уровень ${st.blinds.sb}/${st.blinds.bb}` : '',
     st.tournamentLeft ? `в турнире ${st.tournamentLeft}` : ''].filter(Boolean).join(' · ');
-  const seats = st.seats.map(s => {
+  bar.querySelector('.tt').style.display = settings.tableFolded ? 'none' : '';
+  $('#ttFold').textContent = settings.tableFolded ? '▸' : '▾';
+  $('#ttSee').style.display = settings.tableSee ? '' : 'none';
+  $('#ttSee').textContent = E.describe(st);
+  $('#ttSeeBtn').classList.toggle('on', !!settings.tableSee);
+
+  const n = st.seats.length;
+  const pt = (i, rx, ry, shift = 0) => {
+    const ang = Math.PI / 2 + i * 2 * Math.PI / n + shift;   // игрок 1 внизу, дальше по часовой
+    return { x: 50 + rx * Math.cos(ang), y: 50 + ry * Math.sin(ang) };
+  };
+  let html = '';
+  st.seats.forEach((s, i) => {
+    const pos = p.bySeat[s.seat] || '';
     const a = acted[s.seat];
-    const info = s.alive ? (s.stack != null ? s.stack : '—') + (a ? ' · ' + E.ACT_RU[a.act] + (a.amount ? ' ' + a.amount : '') : '') : 'вылетел';
-    return `<div class="seat${s.seat === 1 ? ' me' : ''}${s.alive ? '' : ' out'}">${st.buttonSeat === s.seat ? '<i>D</i>' : ''}` +
-      `<b>${s.seat === 1 ? 'Я' : s.seat}</b> ${esc(p.bySeat[s.seat] || '')}<small>${esc(info)}</small></div>`;
-  }).join('');
-  return `<div class="tb-head">${esc(head)}</div><div class="seats">${seats}</div>`;
+    const folded = m.folded[s.seat];
+    const blind = s.seat === m.sbSeat ? ' sb' : s.seat === m.bbSeat ? ' bb' : '';
+    const info = !s.alive ? 'вылетел' : folded ? 'фолд' : (s.stack != null ? E.fmt(s.stack) + ' bb' : '—');
+    const act = a && !folded && s.alive ? `<u>${E.ACT_RU[a.act]}</u>` : '';
+    const c = pt(i, 41, 41);
+    html += `<div class="ts${s.seat === 1 ? ' me' : ''}${!s.alive || folded ? ' dim' : ''}" style="left:${c.x}%;top:${c.y}%">` +
+      `<b>${s.seat === 1 ? 'Я' : s.seat}</b>${pos ? `<span class="pt${blind}${newHand ? ' flash' : ''}">${esc(pos)}</span>` : ''}` +
+      `<small>${esc(info)}</small>${act}</div>`;
+    const bet = m.bets[s.seat];
+    if (bet) {
+      const q = pt(i, 24, 22);
+      html += `<div class="tb${blind}" style="left:${q.x}%;top:${q.y}%"><i></i>${E.fmt(bet)}</div>`;
+    }
+  });
+  html += `<div class="tt-mid">${miniCards(st.hand && st.hand.cards)}` +
+    (st.hand ? `<div class="tt-pot">банк ${E.fmt(m.pot)} BB${m.toCall ? `<br><span>мне колл ${E.fmt(m.toCall)}</span>` : ''}</div>` : '') + '</div>';
+  $('#ttLayer').innerHTML = html;
+
+  const d = $('#ttD');
+  const bi = st.seats.findIndex(s => s.seat === st.buttonSeat);
+  if (bi >= 0) { const q = pt(bi, 30, 28, 0.32); d.style.display = ''; d.style.left = q.x + '%'; d.style.top = q.y + '%'; }
+  else d.style.display = 'none';
 }
 
 function renderTourBar() {
@@ -281,7 +341,7 @@ function renderTourBar() {
   $('#modeDialog').classList.toggle('on', !tour);
   $('#modeTour').classList.toggle('on', tour);
   $('#tourBar').style.display = tour ? '' : 'none';
-  if (tour) $('#tourBar').innerHTML = tourTableHtml(session.data.tour);
+  if (tour) renderTourTable();
 }
 
 async function setScenario(m) {
@@ -363,9 +423,9 @@ function renderChat() {
   const h = session.data.history;
   if (!h.length && settings.scenario === 'tour') {
     chatEl.innerHTML = `<div class="empty"><b>Сценарий «Турнир»</b><br><br>
-      Сначала состав стола: «турнир на 18, за столом 6, я на баттоне, у меня 1500, блайнды 50 на 100».<br><br>
+      Сначала состав стола: «турнир на 18, за столом 6, я на баттоне, у меня 15». Все стеки и ставки — в больших блайндах.<br><br>
       Дальше каждой фразой называйте карты: «пара девяток», «туз король одномастные». Можно добавить действия:
-      «игрок 3 рейз 300», «у игрока 4 две тысячи», «игрок 5 вылетел».</div>`;
+      «игрок 3 рейз 2,5», «у игрока 4 22», «игрок 5 вылетел», «анте 1».</div>`;
     return;
   }
   if (!h.length) {
@@ -408,7 +468,7 @@ function renderCard() {
   const d = session.data;
   $('#cardTourney').innerHTML = kvHtml(d.tournament, T_NAMES);
   $('#cardTableWrap').style.display = d.tour && d.tour.seats && d.tour.seats.length ? '' : 'none';
-  $('#cardTable').innerHTML = tourTableHtml(d.tour);
+  $('#cardTable').textContent = d.tour && d.tour.seats && d.tour.seats.length ? TourEngine.describe(d.tour) : '';
   $('#cardHands').innerHTML = d.hands.map(h => `<div class="item ${h.id === d.current_hand ? 'current' : ''}" data-hand="${h.id}">
       <div class="grow">№${h.id} ${esc(h.summary || [h.hero_position, h.hero_cards].filter(Boolean).join(', '))}</div></div>`).join('')
     || '<div class="hint">Пока нет — начните рассказывать раздачу.</div>';
@@ -441,6 +501,7 @@ $('#newSess').onclick = () => { switchSession(new Session()); $('#sheet-sessions
 
 function switchSession(s) {
   Speech.stop();
+  $('#tourBar').innerHTML = '';
   session = s;
   brain.session = s;
   renderChat();

@@ -1,4 +1,4 @@
-// tour-engine.js — сценарий «Турнир»: состояние стола, позиции, разбор фраз. Работает без сети.
+// tour-engine.js — сценарий «Турнир»: состояние стола, позиции, фишки, разбор фраз. Работает без сети.
 (function () {
 // ===== Движок сценария «Турнир» =====
 // Состояние стола хранит приложение. Нейросеть получает готовую картину и только советует.
@@ -32,7 +32,8 @@ const clone = (s) => JSON.parse(JSON.stringify(s));
 // ---------- нормализация текста ----------
 function normalize(text) {
   let t = " " + text.toLowerCase().replace(/ё/g, "е") + " ";
-  t = t.replace(/(\d)[\s\u00a0](\d{3})(?!\d)/g, "$1$2");          // "1 500" → "1500"
+  // "1 500" → "1500", но «игрока 3 900» — это игрок 3 и 900
+  t = t.replace(/(игрок\S*\s+(?:номер\s+)?)?(\d{1,3})[\s\u00a0](\d{3})(?!\d)/g, (m, pl, a, b) => pl ? m : a + b);
   t = t.replace(/(\d+)[.,](\d+)\s*тыс\S*/g, (_, a, b) => String(Math.round(parseFloat(a + "." + b) * 1000)));
   t = t.replace(/полтор\S*\s+тыс\S*/g, "1500");
   t = t.replace(/(\d+)\s*тыс\S*/g, (_, a) => String(+a * 1000));
@@ -41,6 +42,12 @@ function normalize(text) {
   t = t.replace(/(один|одна|две|два|три|четыре|пять|шесть|семь|восемь|девять|десять)\s+тыс\S*/g,
     (_, w) => String(WORD_NUM[w] * 1000));
   t = t.replace(/\s(тысяча|тысячу)\s/g, " 1000 ");
+  // стеки и ставки — в больших блайндах: «2,5», «полтора», «три с половиной», «15 бб»
+  t = t.replace(/(\d)[,.](\d)/g, "$1.$2");
+  t = t.replace(/(^|\s)полтора(?=\s)/g, "$11.5");
+  t = t.replace(/(\d+|один|одна|два|две|три|четыре|пять|шесть|семь|восемь|девять|десять)\s+с\s+половин\S*/g,
+    (_, a) => String((/\d/.test(a) ? +a : WORD_NUM[a]) + 0.5));
+  t = t.replace(/(\d(?:\.\d+)?)\s*(?:бб|bb|б\s?б|бэ\s?бэ|биг\S*(?:\s+блайнд\S*)?|больш\S*\s+блайнд\S*|блайнд\S*)(?=[\s,;!?]|$)/g, "$1");
   return t;
 }
 
@@ -49,8 +56,8 @@ function numbersIn(seg) {
   const words = seg.split(/[\s,/]+|\sна\s/).filter(Boolean);
   const out = [];
   for (const w of words) {
-    const m = w.match(/^(\d+)/);
-    if (m) out.push(+m[1]);
+    const m = w.match(/^(\d+(?:\.\d+)?)/);
+    if (m) out.push(parseFloat(m[1]));
     else if (w in WORD_NUM) out.push(WORD_NUM[w]);
   }
   return out;
@@ -115,6 +122,8 @@ function parsePosition(seg) {
 
 // ---------- геометрия стола ----------
 function aliveSeats(st) { return st.seats.filter(s => s.alive).map(s => s.seat); }
+// рассадка текущей раздачи фиксируется при её начале; вылеты учитываются со следующей раздачи
+function handSeats(st) { return st.hand && st.hand.seatsAtStart ? st.hand.seatsAtStart : aliveSeats(st); }
 
 function nextAliveAfter(st, seat) {
   const n = st.seats.length;
@@ -129,14 +138,14 @@ function nextAliveAfter(st, seat) {
 function positions(st) {
   const res = { bySeat: {}, order: [] };
   if (st.buttonSeat == null || !st.seats.length) return res;
-  const alive = aliveSeats(st);
+  const alive = handSeats(st);
   const n = alive.length;
   if (n < 2) return res;
-  // живые места по часовой, начиная с баттона
-  let btn = st.buttonSeat;
-  if (!st.seats[btn - 1].alive) btn = nextAliveAfter(st, btn);
-  const ring = [btn];
-  while (ring.length < n) ring.push(nextAliveAfter(st, ring[ring.length - 1]));
+  // места раздачи по часовой, начиная с баттона
+  const sorted = [...alive].sort((a, b) => a - b);
+  let bi = sorted.findIndex(x => x >= st.buttonSeat);
+  if (bi < 0) bi = 0;
+  const ring = [...sorted.slice(bi), ...sorted.slice(0, bi)];
   if (n === 2) {
     res.bySeat[ring[0]] = "BTN/SB"; res.bySeat[ring[1]] = "BB";
     res.order = [ring[0], ring[1]];
@@ -152,9 +161,9 @@ function positions(st) {
 
 // какое место должно быть баттоном, чтобы игрок 1 стоял на позиции pos
 function buttonForMyPosition(st, pos) {
-  const alive = aliveSeats(st);
+  const alive = handSeats(st);
   const n = alive.length;
-  // пробуем каждого живого как баттон
+  // пробуем каждое место раздачи как баттон
   for (const cand of alive) {
     const tmp = { ...st, buttonSeat: cand };
     const p = positions(tmp).bySeat[1];
@@ -165,7 +174,7 @@ function buttonForMyPosition(st, pos) {
 
 // ---------- разбор фразы в команды ----------
 function splitSegments(t) {
-  return t.split(/[,.;!?]|\sпотом\s|\sзатем\s|\sа\s+игрок|\sи\s+(?=игрок|у игрока|у меня|блайнд)/)
+  return t.split(/(?<!\d)[.,]|[.,](?!\d)|[;!?]|\sпотом\s|\sзатем\s|\sа\s+игрок|\sи\s+(?=игрок|у игрока|у меня|блайнд)/)
     .map(s => s.trim()).filter(Boolean);
 }
 
@@ -189,10 +198,10 @@ function parseSegment(seg) {
     const nums = numbersIn(s.replace(/анте.*/, ""));
     if (nums.length >= 2) cmds.push({ type: "blinds", sb: nums[0], bb: nums[1] });
     else if (nums.length === 1) cmds.push({ type: "blinds", sb: nums[0] / 2, bb: nums[0] });
-    const a = s.match(/анте\s+(\d+)/); if (a) cmds.push({ type: "ante", value: +a[1] });
+    const a = s.match(/анте\s+(\d+(?:\.\d+)?)/); if (a) cmds.push({ type: "ante", value: parseFloat(a[1]) });
     if (cmds.length) return cmds;
   }
-  { const a = s.match(/анте\s+(\d+)/); if (a) return [{ type: "ante", value: +a[1] }]; }
+  { const a = s.match(/анте\s+(\d+(?:\.\d+)?)/); if (a) return [{ type: "ante", value: parseFloat(a[1]) }]; }
 
   // турнир / осталось игроков
   { const m = s.match(/турнир\S*\s+(?:на\s+)?(\d+)|(\d+)\s+(?:игрок\S*|человек)\s+в\s+турнир|осталось\s+(\d+)/);
@@ -212,12 +221,12 @@ function parseSegment(seg) {
   }
 
   // мой стек
-  { const m = s.match(/(?:у меня|мой стек|мой баланс|у меня стек)\s+(\d+)/);
-    if (m) cmds.push({ type: "stack", seat: 1, value: +m[1] }); }
+  { const m = s.match(/(?:у меня|мой стек|мой баланс|у меня стек)\s+(\d+(?:\.\d+)?)/);
+    if (m) cmds.push({ type: "stack", seat: 1, value: parseFloat(m[1]) }); }
 
   // игроки
-  { const m = s.match(/у игрок\S*\s+(\d+|\S+)\s+(?:стек\s+)?(\d+)/) || s.match(/игрок\S*\s+(\d+|\S+)\s+(?:стек|баланс|имеет)\s+(\d+)/);
-    if (m) { const v = +m[1] || WORD_NUM[m[1]]; if (v) cmds.push({ type: "stack", seat: v, value: +m[2] }); } }
+  { const m = s.match(/у игрок\S*\s+(\d+|\S+)\s+(?:стек\s+)?(\d+(?:\.\d+)?)/) || s.match(/игрок\S*\s+(\d+|\S+)\s+(?:стек|баланс|имеет)\s+(\d+(?:\.\d+)?)/);
+    if (m) { const v = +m[1] || WORD_NUM[m[1]]; if (v) cmds.push({ type: "stack", seat: v, value: parseFloat(m[2]) }); } }
 
   { const m = s.match(/игрок\S*\s+(?:номер\s+)?(\d+|\S+)\s+(.*)/);
     if (m && !/^у игрок/.test(s.trim())) {
@@ -226,7 +235,7 @@ function parseSegment(seg) {
       if (seat) {
         const amt = numbersIn(rest)[0];
         if (/вылетел|выбыл|вышел|ушел|вылет/.test(rest)) cmds.push({ type: "out", seat });
-        else if (/олл|ол ин|ол-ин|all|ва-?банк|пуш|вс[её](?:(?<![а-яa-z0-9])(?=[а-яa-z0-9])|(?<=[а-яa-z0-9])(?![а-яa-z0-9]))|на все/.test(rest)) cmds.push({ type: "act", seat, act: "allin", amount: amt || null });
+        else if (/(?<![к])олл|ол ин|ол-ин|all|ва-?банк|пуш|вс[её](?:(?<![а-яa-z0-9])(?=[а-яa-z0-9])|(?<=[а-яa-z0-9])(?![а-яa-z0-9]))|на все/.test(rest)) cmds.push({ type: "act", seat, act: "allin", amount: amt || null });
         else if (/рейз|повыс|поднял|опен|ставк|бет/.test(rest)) cmds.push({ type: "act", seat, act: "raise", amount: amt || null });
         else if (/колл|(?:(?<![а-яa-z0-9])(?=[а-яa-z0-9])|(?<=[а-яa-z0-9])(?![а-яa-z0-9]))кол(?:(?<![а-яa-z0-9])(?=[а-яa-z0-9])|(?<=[а-яa-z0-9])(?![а-яa-z0-9]))|уравн|заколл/.test(rest)) cmds.push({ type: "act", seat, act: "call", amount: amt || null });
         else if (/лимп|докин|доставил/.test(rest)) cmds.push({ type: "act", seat, act: "limp", amount: null });
@@ -285,7 +294,7 @@ function applyCommands(state, commands) {
       case "tournament": st.tournamentLeft = c.left; msgs.push(`В турнире: ${c.left}`); break;
       case "table": {
         const my = st.seats[0]?.stack ?? null;
-        st.tableSize = c.size; st.seats = makeSeats(c.size, my); st.buttonSeat = null; st.firstHandPending = true;
+        st.tableSize = c.size; st.seats = makeSeats(c.size, my); st.buttonSeat = null; st.firstHandPending = true; st.hand = null;
         msgs.push(`За столом ${c.size}, вы — игрок 1, дальше по часовой 2…${c.size}`); break;
       }
       case "reseat": {
@@ -296,7 +305,7 @@ function applyCommands(state, commands) {
         msgs.push(`Новый стол на ${size}, нумерация заново. Назовите вашу позицию`); break;
       }
       case "blinds": st.blinds = { sb: c.sb, bb: c.bb }; msgs.push(`Блайнды ${c.sb}/${c.bb}`); break;
-      case "ante": st.ante = c.value; msgs.push(`Анте ${c.value}`); break;
+      case "ante": st.ante = c.value; msgs.push(`Анте ${fmt(c.value)} BB в банк`); break;
       case "myPos": {
         if (!st.seats.length) { msgs.push("Сначала скажите, сколько игроков за столом"); break; }
         const b = buttonForMyPosition(st, c.pos);
@@ -308,7 +317,7 @@ function applyCommands(state, commands) {
         st.buttonSeat = c.seat; msgs.push(`Баттон у игрока ${c.seat}`); break;
       case "stack":
         if (!st.seats[c.seat - 1]) { msgs.push(`Игрока ${c.seat} нет за столом`); break; }
-        st.seats[c.seat - 1].stack = c.value; msgs.push(`${c.seat === 1 ? "Ваш стек" : "Стек игрока " + c.seat}: ${c.value}`); break;
+        st.seats[c.seat - 1].stack = c.value; msgs.push(`${c.seat === 1 ? "Ваш стек" : "Стек игрока " + c.seat}: ${fmt(c.value)} BB`); break;
       case "out":
         if (!st.seats[c.seat - 1]) break;
         st.seats[c.seat - 1].alive = false;
@@ -319,7 +328,7 @@ function applyCommands(state, commands) {
         if (st.firstHandPending) st.firstHandPending = false;
         else st.buttonSeat = nextAliveAfter(st, st.buttonSeat);
         st.handNo += 1;
-        st.hand = { cards: c.cards, actions: [] };
+        st.hand = { cards: c.cards, actions: [], seatsAtStart: aliveSeats(st) };
         newHand = true;
         msgs.push(`Раздача ${st.handNo}: ${c.cards}${c.suitGuessed ? " (масть не названа — считаю разномастными)" : ""}`);
         break;
@@ -336,40 +345,79 @@ function applyCommands(state, commands) {
   return { state: st, msgs, needAdvice: (newHand || actionsChanged) && !!st.hand };
 }
 
+// ---------- фишки на столе: всё в больших блайндах ----------
+// МБ = 0.5, ББ = 1. Анте — общая сумма в банке в BB. «Рейз 3» — рейз до 3 BB, «олл-ин» — весь стек.
+const fmt = (v) => (v == null ? "—" : String(Math.round(v * 10) / 10));
+
+function tableMoney(st) {
+  const res = { bets: {}, pot: 0, antes: 0, toCall: 0, high: 0, folded: {}, sbSeat: null, bbSeat: null };
+  if (!st.hand || st.buttonSeat == null) return res;
+  const p = positions(st);
+  for (const [seat, pos] of Object.entries(p.bySeat)) {
+    if (pos === "SB" || pos === "BTN/SB") res.sbSeat = +seat;
+    if (pos === "BB") res.bbSeat = +seat;
+  }
+  const stackOf = (s) => st.seats[s - 1] ? st.seats[s - 1].stack : null;
+  const cap = (s, v) => { const k = stackOf(s); return k != null ? Math.min(v, k) : v; };
+  if (res.sbSeat) res.bets[res.sbSeat] = cap(res.sbSeat, 0.5);
+  if (res.bbSeat) res.bets[res.bbSeat] = cap(res.bbSeat, 1);
+  let high = 1;
+  for (const a of st.hand.actions) {
+    const cur = res.bets[a.seat] || 0;
+    if (a.act === "fold") { res.folded[a.seat] = true; continue; }
+    if (a.act === "check") continue;
+    let v = cur;
+    if (a.act === "raise") v = a.amount || high * 2;
+    else if (a.act === "call") v = a.amount || high;
+    else if (a.act === "limp") v = 1;
+    else if (a.act === "allin") v = a.amount || stackOf(a.seat) || high;
+    v = cap(a.seat, Math.max(v, cur));
+    res.bets[a.seat] = v;
+    if (v > high) high = v;
+  }
+  res.high = high;
+  res.antes = st.ante || 0;
+  res.pot = Math.round((res.antes + Object.values(res.bets).reduce((x, y) => x + y, 0)) * 100) / 100;
+  res.toCall = Math.max(0, high - (res.bets[1] || 0));
+  return res;
+}
+
 // ---------- описание ситуации для нейросети ----------
 const ACT_RU = { fold: "фолд", call: "колл", raise: "рейз", allin: "олл-ин", limp: "лимп", check: "чек" };
 
-function bbOf(st, stack) {
-  if (stack == null || !st.blinds) return "";
-  return ` (${(stack / st.blinds.bb).toFixed(1)} BB)`;
-}
-
 function describe(st) {
   const p = positions(st);
+  const m = tableMoney(st);
   const lines = [];
   if (st.tournamentLeft) lines.push(`Осталось в турнире: ${st.tournamentLeft}.`);
-  lines.push(`За столом живых: ${aliveSeats(st).length}.`);
-  lines.push(st.blinds ? `Блайнды ${st.blinds.sb}/${st.blinds.bb}${st.ante ? ", анте " + st.ante : ""}.` : "Блайнды не названы.");
-  if (st.hand) lines.push(`Раздача №${st.handNo}. Мои карты: ${st.hand.cards}.`);
+  lines.push(`За столом в раздаче: ${handSeats(st).length}.`);
+  lines.push("Все стеки и ставки — в больших блайндах (BB). МБ 0.5, ББ 1." + (st.ante ? ` Анте в банке: ${fmt(st.ante)} BB.` : " Анте нет.") +
+    (st.blinds ? ` Уровень блайндов ${st.blinds.sb}/${st.blinds.bb}.` : ""));
+  if (st.hand) {
+    lines.push(`Раздача №${st.handNo}. Мои карты: ${st.hand.cards}.`);
+    lines.push(`Банк сейчас: ${fmt(m.pot)} BB. Максимальная ставка: ${fmt(m.high)} BB. Мне доставить до колла: ${fmt(m.toCall)} BB.`);
+  }
   lines.push("Порядок хода префлоп:");
   const acted = {};
   if (st.hand) for (const a of st.hand.actions) acted[a.seat] = a;
   for (const seat of p.order) {
     const s = st.seats[seat - 1];
     const who = seat === 1 ? "Я (игрок 1)" : `Игрок ${seat}`;
-    const stack = s.stack != null ? `стек ${s.stack}${bbOf(st, s.stack)}` : "стек неизвестен";
+    const stack = s.stack != null ? `стек ${fmt(s.stack)} BB` : "стек неизвестен";
+    const bet = m.bets[seat] ? `, в банке ${fmt(m.bets[seat])} BB` : "";
     const a = acted[seat];
-    const act = seat === 1 ? "← МОЙ ХОД" : a ? `${ACT_RU[a.act]}${a.amount ? " " + a.amount : ""}` : "действие не названо";
-    lines.push(`- ${p.bySeat[seat]}: ${who}, ${stack}, ${act}`);
+    const act = seat === 1 ? "← МОЙ ХОД" : m.folded[seat] ? "фолд" : a ? `${ACT_RU[a.act]}${a.amount ? " " + fmt(a.amount) + " BB" : ""}` : "действие не названо";
+    lines.push(`- ${p.bySeat[seat]}: ${who}, ${stack}${bet}, ${act}`);
   }
   return lines.join("\n");
 }
 
 
 const ADVICE_SYSTEM = `Ты тренер по турнирному покеру (MTT, Spin&Go, SNG), игра на виртуальные фишки, цель — обучение.
-Тебе дают точное состояние стола префлоп: позиции, стеки, действия соперников. Ответ будет озвучен голосом:
+Тебе дают точное состояние стола префлоп: позиции, стеки и ставки в больших блайндах (BB), действия соперников. Ответ будет озвучен голосом:
 - по-русски, 1–2 коротких предложения, без списков, звёздочек и символов;
 - начинай с действия: «Фолд», «Колл», «Рейз до …», «Олл-ин», «Чек»;
+- размер рейза называй в BB («рейз до двух с половиной»);
 - затем одно короткое объяснение: стек в BB, позиция, кто уже вошёл в банк;
 - карты и позиции называй словами по-русски, не пиши латинские обозначения вроде A5s;
 - не называй точных процентов эквити.
@@ -377,13 +425,14 @@ const ADVICE_SYSTEM = `Ты тренер по турнирному покеру 
 
 const PARSE_SYSTEM = `Преобразуй фразу игрока о покерном столе в JSON-массив команд. Верни ТОЛЬКО JSON, без пояснений.
 Текст получен распознаванием речи и может содержать ошибки. Игрок 1 — говорящий, остальные пронумерованы по часовой.
+Все стеки и ставки — в больших блайндах (BB), бывают дробные: 2.5. Анте — общая сумма в банке в BB.
 {"type":"hand","cards":"AKs"} — новые карты (пары "99", одномастные s, разномастные o)
-{"type":"act","seat":N,"act":"fold|call|raise|allin|limp|check","amount":N или null}
-{"type":"stack","seat":N,"value":N}   {"type":"out","seat":N}
-{"type":"blinds","sb":N,"bb":N}   {"type":"ante","value":N}
+{"type":"act","seat":N,"act":"fold|call|raise|allin|limp|check","amount":BB или null}
+{"type":"stack","seat":N,"value":BB}   {"type":"out","seat":N}
+{"type":"ante","value":BB}
 {"type":"table","size":N}   {"type":"tournament","left":N}
 {"type":"myPos","pos":"BTN|SB|BB|UTG|UTG+1|UTG+2|LJ|HJ|CO"}   {"type":"button","seat":N}
 Если это вопрос или фраза не про состояние стола — верни [].`;
 
-window.TourEngine = { initialState, parsePhrase, sortCommands, applyCommands, positions, describe, ACT_RU, POS_RU, ADVICE_SYSTEM, PARSE_SYSTEM };
+window.TourEngine = { fmt, tableMoney, initialState, parsePhrase, sortCommands, applyCommands, positions, describe, ACT_RU, POS_RU, ADVICE_SYSTEM, PARSE_SYSTEM };
 })();

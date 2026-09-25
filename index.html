@@ -78,15 +78,42 @@
   #modeBar button.on { background: var(--accent); color: var(--fg); font-weight: 600; }
   #tourBar { margin: 8px 12px 0; padding: 8px 10px; background: var(--panel); border-radius: 12px; }
   #tourBar .hint { margin: 0; }
-  .tb-head { font-size: 14px; font-weight: 600; margin-bottom: 6px; }
-  .seats { display: flex; flex-wrap: wrap; gap: 5px; }
-  .seat { position: relative; background: var(--bg); border: 1px solid var(--line); border-radius: 9px; padding: 3px 7px;
-    font-size: 13px; line-height: 1.25; min-width: 58px; }
-  .seat small { display: block; color: var(--muted); font-size: 12px; }
-  .seat.me { border-color: var(--accent2); background: #1f3a2f; }
-  .seat.out { opacity: .4; }
-  .seat i { position: absolute; top: -7px; right: -6px; width: 17px; height: 17px; border-radius: 50%; background: var(--fg);
-    color: var(--bg); font: 700 10px/17px system-ui; font-style: normal; text-align: center; }
+  .tt-head { display: flex; align-items: center; gap: 4px; font-size: 13px; color: var(--muted); }
+  .tt-head span { flex: 1; min-width: 0; }
+  .tt-head button { padding: 3px 8px; font-size: 14px; background: transparent; }
+  .tt-head button.on { background: var(--panel2); }
+  .tt { position: relative; height: 236px; margin-top: 4px; }
+  .tt-felt { position: absolute; inset: 13% 9%; border-radius: 50%; background: radial-gradient(ellipse at 50% 40%, #1f6b4f, #134634);
+    border: 7px solid #4a3222; box-shadow: inset 0 0 22px rgba(0,0,0,.45); }
+  .ts { position: absolute; transform: translate(-50%, -50%); background: var(--bg); border: 1px solid var(--line); border-radius: 9px;
+    padding: 2px 6px; font-size: 12px; line-height: 1.2; text-align: center; min-width: 50px; z-index: 2; }
+  .ts b { font-size: 12px; }
+  .ts small { display: block; color: var(--muted); font-size: 11px; }
+  .ts u { display: block; text-decoration: none; color: #e3b341; font-size: 11px; }
+  .ts.me { border-color: var(--accent2); background: #1f3a2f; }
+  .ts.dim { opacity: .42; }
+  .pt { margin-left: 4px; padding: 0 4px; border-radius: 5px; background: var(--panel2); font-size: 11px; }
+  .pt.sb { background: #2f5d8a; } .pt.bb { background: #9a5b1c; }
+  .pt.flash { animation: flash 1s ease-out; }
+  @keyframes flash { 0% { background: #e3b341; color: #15181d; } 100% { } }
+  .tb { position: absolute; transform: translate(-50%, -50%); display: flex; align-items: center; gap: 3px; font-size: 11px;
+    font-weight: 600; color: #fff; text-shadow: 0 1px 2px #000; z-index: 1; white-space: nowrap; }
+  .tb i { width: 11px; height: 11px; border-radius: 50%; background: #d9d9d9; border: 2px dashed #b33; }
+  .tb.sb i { border-color: #2f5d8a; } .tb.bb i { border-color: #9a5b1c; }
+  .tt-mid { position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%); text-align: center; z-index: 1; }
+  .tt-cards { display: flex; gap: 4px; justify-content: center; }
+  .cd { width: 30px; height: 42px; border-radius: 5px; background: #fbf7ee; color: #1d2b25; font: 700 17px/1 Georgia, serif;
+    display: flex; flex-direction: column; align-items: center; justify-content: center; }
+  .cd em { font-style: normal; font-size: 11px; }
+  .cd.red { color: #c8423b; }
+  .tt-wait { color: #9fc3b2; font-size: 12px; }
+  .tt-pot { margin-top: 3px; font-size: 12px; line-height: 1.25; color: #fbf7ee; font-weight: 600; }
+  .tt-pot span { color: #e3b341; font-weight: 400; }
+  #ttD { position: absolute; transform: translate(-50%, -50%); width: 20px; height: 20px; border-radius: 50%; background: #fbf7ee;
+    color: #15181d; font: 800 11px/20px system-ui; font-style: normal; text-align: center; border: 2px solid #e3b341; z-index: 3;
+    transition: left .6s ease, top .6s ease; }
+  #ttSee { margin: 6px 0 0; padding: 8px; background: var(--bg); border-radius: 8px; font-size: 12px; white-space: pre-wrap; color: var(--muted); }
+  #cardTable { white-space: pre-wrap; font-size: 13px; color: var(--muted); }
 </style>
 </head>
 <body>
