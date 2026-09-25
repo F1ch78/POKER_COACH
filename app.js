@@ -1,7 +1,7 @@
 // Интерфейс, голос (распознавание и синтез речи Android), сессии, настройки.
 const $ = s => document.querySelector(s);
 const chatEl = $('#chat');
-const DEFAULTS = { apiKey: '', workspaceId: '', apiFormat: 'auto', model: 'claude-sonnet-4-5', baseUrl: '', voiceURI: '', rate: 1.1, autoListen: false, maxHistory: 40 };
+const DEFAULTS = { apiKey: '', workspaceId: '', apiFormat: 'auto', model: 'claude-sonnet-4-5', baseUrl: '', voiceURI: '', rate: 1.1, autoListen: false, maxHistory: 40, scenario: 'dialog' };
 let settings = { ...DEFAULTS };
 let session = null;
 let brain = null;
@@ -136,9 +136,14 @@ function clearInterim() { if (interimEl) { interimEl.remove(); interimEl = null;
 // ================================================================ диалог
 async function handle(text) {
   if (!settings.apiKey) { sys('Сначала укажите API-ключ Claude в настройках.'); openSheet('settings'); setState('idle'); return; }
+  if (settings.scenario === 'tour') return handleTour(text);
+  return askCoach(text, false);
+}
+
+async function askCoach(text, alreadyShown) {
   busy = true;
   Speech.muted = false;
-  addMsg('user', text);
+  if (!alreadyShown) addMsg('user', text);
   const bubble = addMsg('bot', '');
   setState('thinking');
   const sb = sentenceBuffer(s => { Speech.say(s); if (state !== 'speaking') setState('speaking'); });
@@ -157,6 +162,140 @@ async function handle(text) {
   }
 }
 Speech.onIdle = () => { if (!busy) afterAnswer(); };
+
+// ================================================================ сценарий «Турнир»
+// Позиции, баттон и стеки считает tour-engine.js на телефоне. Нейросеть только советует.
+async function handleTour(text) {
+  const E = window.TourEngine;
+  const d = session.data;
+  busy = true;
+  Speech.muted = false;
+  addMsg('user', text);
+  setState('thinking');
+  let delegated = false;
+  try {
+    const before = d.tour || E.initialState();
+    let { commands, unknown } = E.parsePhrase(text);
+
+    if (commands.some(c => c.type === 'undo')) {
+      const prev = (d.tourHist || []).pop();
+      if (prev) { d.tour = prev; await session.save(); renderTourBar(); sys('Отменил последнюю фразу'); Speech.say('Отменил'); }
+      else sys('Отменять нечего');
+      return;
+    }
+
+    if (unknown.length) {
+      let extra = [];
+      try { extra = await brain.parseTour(unknown.join(', ')); } catch (e) { brain.onLog('Разбор фразы: ' + e.message); }
+      if (extra.length) commands = E.sortCommands([...commands, ...extra]);
+      else if (!commands.length) {
+        // это вопрос, а не данные о столе — отвечает тренер с учётом стола
+        busy = false; delegated = true;
+        return askCoach(text, true);
+      }
+    }
+    if (!commands.length) { sys('Не понял фразу, скажите иначе'); return; }
+
+    const r = E.applyCommands(before, commands);
+    d.tourHist = [...(d.tourHist || []).slice(-29), before];
+    d.tour = r.state;
+    syncCardFromTour(r.state);
+    await session.save();
+    renderTourBar();
+    if (r.msgs.length) sys(r.msgs.join(' · '));
+
+    if (r.needAdvice) {
+      const bubble = addMsg('bot', '');
+      const sb = sentenceBuffer(s => { Speech.say(s); if (state !== 'speaking') setState('speaking'); });
+      const t0 = performance.now();
+      let first = 0;
+      const ans = await brain.advise(E.describe(r.state), chunk => {
+        if (!first) first = performance.now() - t0;
+        bubble.textContent = (bubble.textContent + chunk).replace(/^\s+/, '');
+        scrollDown(); sb.feed(chunk);
+      });
+      sb.flush();
+      if (!ans) bubble.remove();
+      else {
+        session.addTurn('user', text);
+        session.addTurn('assistant', ans);
+        const t = document.createElement('small');
+        t.style.cssText = 'display:block;opacity:.55;font-size:11px;margin-top:3px';
+        t.textContent = `первое слово через ${(first / 1000).toFixed(1)} с`;
+        bubble.appendChild(t);
+      }
+    } else if (r.msgs.length) Speech.say(r.msgs.join('. '));
+  } catch (e) {
+    sys('Ошибка: ' + e.message);
+  } finally {
+    if (!delegated) {
+      busy = false;
+      renderHeader();
+      if (!Speech.busy) afterAnswer();
+    }
+  }
+}
+
+// Данные стола → «Карточка сессии» (турнир и раздачи), чтобы в «Диалоге» тренер видел то же самое
+function syncCardFromTour(st) {
+  const E = window.TourEngine;
+  const t = {};
+  if (st.tournamentLeft) t.players = st.tournamentLeft;
+  if (st.blinds) t.blinds = `${st.blinds.sb}/${st.blinds.bb}`;
+  if (st.ante) t.ante = String(st.ante);
+  const me = st.seats[0];
+  if (me && me.stack != null) t.hero_stack = String(me.stack);
+  if (Object.keys(t).length) session.updateTournament(t);
+  if (st.hand) {
+    const pos = E.positions(st).bySeat[1];
+    const pre = st.hand.actions.map(a => `игрок ${a.seat} ${E.ACT_RU[a.act]}${a.amount ? ' ' + a.amount : ''}`).join(', ');
+    const f = { hero_position: pos, hero_cards: st.hand.cards, hero_stack: me && me.stack != null ? String(me.stack) : undefined,
+      blinds: t.blinds, preflop: pre || undefined, summary: `${pos || ''} ${st.hand.cards}`.trim() };
+    if (st.hand.cardId) f.hand_id = st.hand.cardId;
+    st.hand.cardId = session.upsertHand(f).hand.id;
+  }
+  brain.onCardChanged();
+}
+
+function tourTableHtml(st) {
+  const E = window.TourEngine;
+  if (!st || !st.seats || !st.seats.length)
+    return '<div class="hint">Для начала скажите: «Турнир на 18, за столом 6, я на баттоне, у меня 1500, блайнды 50 на 100»</div>';
+  const p = E.positions(st);
+  const acted = {};
+  (st.hand ? st.hand.actions : []).forEach(a => { acted[a.seat] = a; });
+  const head = [st.hand ? `Раздача ${st.handNo}: ${st.hand.cards}` : 'Ждём карты',
+    st.blinds ? `блайнды ${st.blinds.sb}/${st.blinds.bb}` : 'блайнды не названы',
+    st.tournamentLeft ? `в турнире ${st.tournamentLeft}` : ''].filter(Boolean).join(' · ');
+  const seats = st.seats.map(s => {
+    const a = acted[s.seat];
+    const info = s.alive ? (s.stack != null ? s.stack : '—') + (a ? ' · ' + E.ACT_RU[a.act] + (a.amount ? ' ' + a.amount : '') : '') : 'вылетел';
+    return `<div class="seat${s.seat === 1 ? ' me' : ''}${s.alive ? '' : ' out'}">${st.buttonSeat === s.seat ? '<i>D</i>' : ''}` +
+      `<b>${s.seat === 1 ? 'Я' : s.seat}</b> ${esc(p.bySeat[s.seat] || '')}<small>${esc(info)}</small></div>`;
+  }).join('');
+  return `<div class="tb-head">${esc(head)}</div><div class="seats">${seats}</div>`;
+}
+
+function renderTourBar() {
+  const tour = settings.scenario === 'tour';
+  $('#modeDialog').classList.toggle('on', !tour);
+  $('#modeTour').classList.toggle('on', tour);
+  $('#tourBar').style.display = tour ? '' : 'none';
+  if (tour) $('#tourBar').innerHTML = tourTableHtml(session.data.tour);
+}
+
+async function setScenario(m) {
+  if (settings.scenario === m) return;
+  settings.scenario = m;
+  await DB.put('kv', settings, 'settings');
+  renderTourBar();
+  renderChat();
+  sys(m === 'tour'
+    ? 'Сценарий «Турнир». Назовите карты — начнётся новая раздача, баттон сдвинется сам. «Отмена» — отменить последнюю фразу.'
+    : 'Обычный диалог. Если стол заполнен, тренер его учитывает.');
+}
+$('#modeDialog').onclick = () => setScenario('dialog');
+$('#modeTour').onclick = () => setScenario('tour');
 function afterAnswer() {
   if (rec) return;
   setState('idle');
@@ -222,6 +361,13 @@ function scrollDown() { chatEl.scrollTop = chatEl.scrollHeight; }
 function renderChat() {
   chatEl.innerHTML = '';
   const h = session.data.history;
+  if (!h.length && settings.scenario === 'tour') {
+    chatEl.innerHTML = `<div class="empty"><b>Сценарий «Турнир»</b><br><br>
+      Сначала состав стола: «турнир на 18, за столом 6, я на баттоне, у меня 1500, блайнды 50 на 100».<br><br>
+      Дальше каждой фразой называйте карты: «пара девяток», «туз король одномастные». Можно добавить действия:
+      «игрок 3 рейз 300», «у игрока 4 две тысячи», «игрок 5 вылетел».</div>`;
+    return;
+  }
   if (!h.length) {
     chatEl.innerHTML = `<div class="empty"><b>Расскажите про турнир и раздачу</b><br><br>
       Например: «Играл спин по пять долларов, стек 500, блайнды 10/20. Первая раздача: я на баттоне с туз-пятёркой одномастной…»<br><br>
@@ -261,6 +407,8 @@ const H_NAMES = { hero_position: 'Позиция', hero_cards: 'Карты', her
 function renderCard() {
   const d = session.data;
   $('#cardTourney').innerHTML = kvHtml(d.tournament, T_NAMES);
+  $('#cardTableWrap').style.display = d.tour && d.tour.seats && d.tour.seats.length ? '' : 'none';
+  $('#cardTable').innerHTML = tourTableHtml(d.tour);
   $('#cardHands').innerHTML = d.hands.map(h => `<div class="item ${h.id === d.current_hand ? 'current' : ''}" data-hand="${h.id}">
       <div class="grow">№${h.id} ${esc(h.summary || [h.hero_position, h.hero_cards].filter(Boolean).join(', '))}</div></div>`).join('')
     || '<div class="hint">Пока нет — начните рассказывать раздачу.</div>';
@@ -297,6 +445,7 @@ function switchSession(s) {
   brain.session = s;
   renderChat();
   renderHeader();
+  renderTourBar();
 }
 
 async function renderKB() {
@@ -390,6 +539,7 @@ document.addEventListener('visibilitychange', () => { if (document.visibilitySta
   brain.onLog = t => console.log(t);
   renderChat();
   renderHeader();
+  renderTourBar();
   setState('idle');
   if (!SR) sys('Этот браузер не умеет распознавать речь. Откройте в Google Chrome — или печатайте вопросы.');
   if (!settings.apiKey) openSheet('settings');

@@ -71,6 +71,22 @@
   .row button { flex: 1; }
   .primary { background: var(--accent); }
   .hint { color: var(--muted); font-size: 13px; margin-top: 6px; }
+
+  /* выбор сценария и стол «Турнира» */
+  #modeBar { display: flex; gap: 4px; margin: 8px 12px 0; padding: 3px; background: var(--panel); border-radius: 12px; }
+  #modeBar button { flex: 1; padding: 7px 0; font-size: 14px; background: transparent; color: var(--muted); }
+  #modeBar button.on { background: var(--accent); color: var(--fg); font-weight: 600; }
+  #tourBar { margin: 8px 12px 0; padding: 8px 10px; background: var(--panel); border-radius: 12px; }
+  #tourBar .hint { margin: 0; }
+  .tb-head { font-size: 14px; font-weight: 600; margin-bottom: 6px; }
+  .seats { display: flex; flex-wrap: wrap; gap: 5px; }
+  .seat { position: relative; background: var(--bg); border: 1px solid var(--line); border-radius: 9px; padding: 3px 7px;
+    font-size: 13px; line-height: 1.25; min-width: 58px; }
+  .seat small { display: block; color: var(--muted); font-size: 12px; }
+  .seat.me { border-color: var(--accent2); background: #1f3a2f; }
+  .seat.out { opacity: .4; }
+  .seat i { position: absolute; top: -7px; right: -6px; width: 17px; height: 17px; border-radius: 50%; background: var(--fg);
+    color: var(--bg); font: 700 10px/17px system-ui; font-style: normal; text-align: center; }
 </style>
 </head>
 <body>
@@ -82,6 +98,8 @@
   <button data-open="settings" aria-label="Настройки">⚙</button>
 </header>
 
+<div id="modeBar"><button id="modeDialog">Диалог</button><button id="modeTour">Турнир</button></div>
+<div id="tourBar" style="display:none"></div>
 <div id="chat"></div>
 <div id="status"></div>
 
@@ -98,6 +116,7 @@
 <div class="sheet" id="sheet-card"><div class="box">
   <h2>Карточка сессии <button data-close>✕</button></h2>
   <h3>Турнир</h3><div id="cardTourney" class="kv"></div>
+  <div id="cardTableWrap"><h3>Стол</h3><div id="cardTable"></div></div>
   <h3>Раздачи (нажмите, чтобы сделать текущей)</h3><div id="cardHands"></div>
   <h3>Текущая раздача</h3><div id="cardHand" class="kv"></div>
 </div></div>
@@ -152,6 +171,7 @@
 <script src="poker.js"></script>
 <script src="store.js"></script>
 <script src="kb.js"></script>
+<script src="tour-engine.js"></script>
 <script src="brain.js"></script>
 <script src="app.js"></script>
 </body>

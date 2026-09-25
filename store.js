@@ -48,6 +48,8 @@ class Session {
       current_hand: null,
       summary: '',
       history: [],
+      tour: null,      // состояние стола сценария «Турнир»
+      tourHist: [],    // история для «отмены»
     }, data || {});
   }
   async save() {

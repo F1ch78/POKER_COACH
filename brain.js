@@ -123,6 +123,9 @@ class Brain {
 
   system(userText) {
     const parts = [SYSTEM_PROMPT, '\n=== КАРТОЧКА СЕССИИ ===\n' + this.session.cardText()];
+    const tour = this.session.data.tour;
+    if (tour && tour.seats && tour.seats.length && window.TourEngine)
+      parts.push('\n=== СТОЛ СЦЕНАРИЯ «ТУРНИР» (точные данные, позиции посчитаны приложением) ===\n' + TourEngine.describe(tour));
     const hand = this.session.currentHand();
     const hits = KB.search(userText + ' ' + (hand && hand.summary || ''), 3);
     if (hits.length) parts.push('\n=== ИЗ БАЗЫ ЗНАНИЙ УЧЕНИКА ===\n' + hits.map(h => `[${h.src}]\n${h.text}`).join('\n---\n'));
@@ -329,6 +332,22 @@ class Brain {
     this.session.addTurn('user', userText);
     this.session.addTurn('assistant', answer || '(без ответа)');
     return answer;
+  }
+
+  // Быстрый совет в сценарии «Турнир»: один потоковый запрос без инструментов и истории
+  async advise(situation, onText) {
+    let out = '';
+    await this.streamOnce({ model: this.settings.model, max_tokens: 300, system: TourEngine.ADVICE_SYSTEM,
+      messages: [{ role: 'user', content: situation }] }, t => { out += t; onText(t); });
+    return out.trim();
+  }
+
+  // Разбор фразы, которую не понял локальный разборщик → массив команд
+  async parseTour(text) {
+    const raw = await this.complete(TourEngine.PARSE_SYSTEM + '\n\nФраза: ' + text, 300);
+    const m = raw.match(/\[[\s\S]*\]/);
+    const arr = m ? JSON.parse(m[0]) : [];
+    return Array.isArray(arr) ? arr : [];
   }
 
   // Проверка связи; возвращает найденный формат API
