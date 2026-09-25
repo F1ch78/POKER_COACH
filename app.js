@@ -136,7 +136,7 @@ function clearInterim() { if (interimEl) { interimEl.remove(); interimEl = null;
 // ================================================================ диалог
 async function handle(text) {
   if (!settings.apiKey) { sys('Сначала укажите API-ключ Claude в настройках.'); openSheet('settings'); setState('idle'); return; }
-  if (settings.scenario === 'tour') return handleTour(text);
+  if (settings.scenario === 'tour' || settings.scenario === 'sng') return handleTour(text);
   return askCoach(text, false);
 }
 
@@ -163,7 +163,12 @@ async function askCoach(text, alreadyShown) {
 }
 Speech.onIdle = () => { if (!busy) afterAnswer(); };
 
-// ================================================================ сценарий «Турнир»
+// ================================================================ сценарий «Турнир» и «Sit&Go»
+// У каждого сценария свой стол: «Турнир» — data.tour, «Sit&Go» — data.sngTour
+const isTable = () => settings.scenario === 'tour' || settings.scenario === 'sng';
+const tourKey = () => settings.scenario === 'sng' ? 'sngTour' : 'tour';
+const histKey = () => settings.scenario === 'sng' ? 'sngHist' : 'tourHist';
+const curTour = () => session.data[tourKey()];
 // Позиции, баттон и стеки считает tour-engine.js на телефоне. Нейросеть только советует.
 async function handleTour(text) {
   const E = window.TourEngine;
@@ -174,12 +179,14 @@ async function handleTour(text) {
   setState('thinking');
   let delegated = false;
   try {
-    const before = d.tour || E.initialState();
+    const sngMode = settings.scenario === 'sng';
+    if (sngMode && !(d.sngTour && d.sngTour.sng)) { sys('Сначала выберите формат Sit&Go кнопками над чатом.'); return; }
+    const before = d[tourKey()] || E.initialState();
     let { commands, unknown } = E.parsePhrase(text);
 
     if (commands.some(c => c.type === 'undo')) {
-      const prev = (d.tourHist || []).pop();
-      if (prev) { d.tour = prev; await session.save(); renderTourBar(); sys('Отменил последнюю фразу'); Speech.say('Отменил'); }
+      const prev = (d[histKey()] || []).pop();
+      if (prev) { d[tourKey()] = prev; await session.save(); renderTourBar(); sys('Отменил последнюю фразу'); Speech.say('Отменил'); }
       else sys('Отменять нечего');
       return;
     }
@@ -197,8 +204,13 @@ async function handleTour(text) {
     if (!commands.length) { sys('Не понял фразу, скажите иначе'); return; }
 
     const r = E.applyCommands(before, commands);
-    d.tourHist = [...(d.tourHist || []).slice(-29), before];
-    d.tour = r.state;
+    if (sngMode) {
+      // пересадка/состав стола не должны терять формат Sit&Go; «новая сессия» — вернуть выбор формата
+      if (before.sng && !r.state.sng && !commands.some(c => c.type === 'reset')) r.state.sng = before.sng;
+      SNG.rescaleOnBlinds(before, r.state, commands);
+    }
+    d[histKey()] = [...(d[histKey()] || []).slice(-29), before];
+    d[tourKey()] = r.state;
     syncCardFromTour(r.state);
     await session.save();
     renderTourBar();
@@ -209,11 +221,12 @@ async function handleTour(text) {
       const sb = sentenceBuffer(s => { Speech.say(s); if (state !== 'speaking') setState('speaking'); });
       const t0 = performance.now();
       let first = 0;
-      const ans = await brain.advise(E.describe(r.state), chunk => {
+      const situation = E.describe(r.state) + (sngMode ? '\n' + SNG.context(r.state) : '');
+      const ans = await brain.advise(situation, chunk => {
         if (!first) first = performance.now() - t0;
         bubble.textContent = (bubble.textContent + chunk).replace(/^\s+/, '');
         scrollDown(); sb.feed(chunk);
-      });
+      }, sngMode ? SNG.ADVICE_SYSTEM : undefined);
       sb.flush();
       if (!ans) bubble.remove();
       else {
@@ -241,6 +254,7 @@ function syncCardFromTour(st) {
   const E = window.TourEngine;
   const t = {};
   if (st.tournamentLeft) t.players = st.tournamentLeft;
+  if (st.sng) { t.format = `Spin&Gold ${st.sng.fmt}-max ${SNG.multLabel(st.sng.mult)}`; t.starting_stack = st.sng.chips + ' фишек'; }
   if (st.blinds) t.blinds = `${st.blinds.sb}/${st.blinds.bb}`;
   if (st.ante) t.ante = TourEngine.fmt(st.ante) + ' BB';
   const me = st.seats[0];
@@ -273,7 +287,8 @@ let ttLastHand = null;
 function renderTourTable() {
   const E = window.TourEngine;
   const bar = $('#tourBar');
-  const st = session.data.tour;
+  const st = curTour();
+  if (settings.scenario === 'sng' && !(st && st.sng)) { renderSngSetup(); ttLastHand = null; return; }
   if (!st || !st.seats || !st.seats.length) {
     bar.innerHTML = '<div class="hint">Для начала скажите: «Турнир на 18, за столом 6, я на баттоне, у меня 15». Стеки — в больших блайндах.</div>';
     ttLastHand = null;
@@ -281,11 +296,16 @@ function renderTourTable() {
   }
   if (!bar.querySelector('.tt')) {
     bar.innerHTML = `<div class="tt-head"><span id="ttTitle"></span>
-        <button id="ttSeeBtn" title="Что видит нейросеть">👁</button><button id="ttFold" title="Свернуть">▾</button></div>
+        <button id="ttNew" title="Новый Sit&Go">↺</button><button id="ttSeeBtn" title="Что видит нейросеть">👁</button><button id="ttFold" title="Свернуть">▾</button></div>
       <div class="tt"><div class="tt-felt"></div><div id="ttLayer"></div><i id="ttD">D</i></div>
       <pre id="ttSee"></pre>`;
     $('#ttSeeBtn').onclick = () => { settings.tableSee = !settings.tableSee; DB.put('kv', settings, 'settings'); renderTourTable(); };
     $('#ttFold').onclick = () => { settings.tableFolded = !settings.tableFolded; DB.put('kv', settings, 'settings'); renderTourTable(); };
+    $('#ttNew').onclick = async () => {
+      if (!confirm('Начать новый Sit&Go? Текущий стол будет сброшен.')) return;
+      session.data.sngHist = [...(session.data.sngHist || []).slice(-29), session.data.sngTour];
+      session.data.sngTour = null; await session.save(); $('#tourBar').innerHTML = ''; renderTourTable();
+    };
   }
   const p = E.positions(st);
   const m = E.tableMoney(st);
@@ -294,13 +314,16 @@ function renderTourTable() {
   const newHand = ttLastHand !== st.handNo;
   ttLastHand = st.handNo;
 
-  $('#ttTitle').textContent = [st.hand ? `Раздача ${st.handNo}` : 'До первой раздачи',
+  $('#ttTitle').textContent = [st.sng ? `${st.sng.fmt}-max ${SNG.multLabel(st.sng.mult)}` : '',
+    st.hand ? `Раздача ${st.handNo}` : 'До первой раздачи',
     'стеки в BB', st.ante ? `анте ${E.fmt(st.ante)}` : '', st.blinds ? `уровень ${st.blinds.sb}/${st.blinds.bb}` : '',
-    st.tournamentLeft ? `в турнире ${st.tournamentLeft}` : ''].filter(Boolean).join(' · ');
+    !st.sng && st.tournamentLeft ? `в турнире ${st.tournamentLeft}` : '',
+    st.sng ? `платят ${st.sng.payouts.length}` : ''].filter(Boolean).join(' · ');
+  $('#ttNew').style.display = st.sng ? '' : 'none';
   bar.querySelector('.tt').style.display = settings.tableFolded ? 'none' : '';
   $('#ttFold').textContent = settings.tableFolded ? '▸' : '▾';
   $('#ttSee').style.display = settings.tableSee ? '' : 'none';
-  $('#ttSee').textContent = E.describe(st);
+  $('#ttSee').textContent = E.describe(st) + (st.sng ? '\n' + SNG.context(st) : '');
   $('#ttSeeBtn').classList.toggle('on', !!settings.tableSee);
 
   const n = st.seats.length;
@@ -336,10 +359,52 @@ function renderTourTable() {
   else d.style.display = 'none';
 }
 
+// ---------------------------------------------------------------- запуск Sit&Go
+let sngPick = null;
+function renderSngSetup() {
+  const S = window.SNG;
+  if (!sngPick) sngPick = Object.assign({ fmt: 3, mult: '2', chips: 300, pos: 'BTN' }, settings.sngLast || {});
+  const pk = sngPick;
+  if (!S.MULTS[pk.fmt].includes(pk.mult)) { pk.mult = S.MULTS[pk.fmt][0]; pk.chips = S.defaultChips(pk.fmt, pk.mult); }
+  if (!S.POSITIONS[pk.fmt].includes(pk.pos)) pk.pos = 'BTN';
+  const pay = S.payouts(pk.fmt, pk.mult).map(x => Math.round(x * 1000) / 10 + '%').join(' / ');
+  const chip = (group, val, label, on) => `<button class="chip${on ? ' on' : ''}" data-g="${group}" data-v="${val}">${label}</button>`;
+  $('#tourBar').innerHTML = `<div class="sng">
+    <div class="sng-row"><span>Формат</span>${[3, 6].map(f => chip('fmt', f, f + '-max', pk.fmt === f)).join('')}</div>
+    <div class="sng-row"><span>Множитель</span>${S.MULTS[pk.fmt].map(m => chip('mult', m, S.multLabel(m), pk.mult === m)).join('')}</div>
+    <div class="sng-row"><span>Стек</span>${[300, 500, 800, 1000].map(c => chip('chips', c, c + ` <small>${c / 20} BB</small>`, pk.chips === c)).join('')}</div>
+    <div class="sng-row"><span>Я на</span>${S.POSITIONS[pk.fmt].map(p => chip('pos', p, S.POS_LABEL[p], pk.pos === p)).join('')}</div>
+    <div class="hint">Выплаты: ${pay}. Блайнды 10/20. Потом голосом: карты, действия соперников, «блайнды 15 30», «игрок 3 вылетел».</div>
+    <button class="primary" id="sngGo" style="width:100%;margin-top:8px">Начать Sit&Go</button></div>`;
+  $('#tourBar').querySelectorAll('.chip').forEach(b => b.onclick = () => {
+    const g = b.dataset.g, v = b.dataset.v;
+    if (g === 'fmt') { pk.fmt = +v; pk.mult = S.MULTS[pk.fmt][0]; pk.chips = S.defaultChips(pk.fmt, pk.mult); }
+    else if (g === 'mult') { pk.mult = v; pk.chips = S.defaultChips(pk.fmt, v); }
+    else if (g === 'chips') pk.chips = +v;
+    else pk.pos = v;
+    renderSngSetup();
+  });
+  $('#sngGo').onclick = async () => {
+    const st = S.start(pk.fmt, pk.mult, pk.chips, pk.pos);
+    session.data.sngTour = st;
+    session.data.sngHist = [];
+    settings.sngLast = { ...pk };
+    await DB.put('kv', settings, 'settings');
+    syncCardFromTour(st);
+    await session.save();
+    $('#tourBar').innerHTML = '';
+    renderTourTable();
+    const msg = `Sit&Go ${pk.fmt}-max ${S.multLabel(pk.mult)}, по ${pk.chips / 20} BB, вы на позиции ${S.POS_LABEL[pk.pos]}. Называйте карты.`;
+    sys(msg + ' ' + S.stageText(st));
+    Speech.say(msg);
+  };
+}
+
 function renderTourBar() {
-  const tour = settings.scenario === 'tour';
-  $('#modeDialog').classList.toggle('on', !tour);
-  $('#modeTour').classList.toggle('on', tour);
+  const tour = isTable();
+  $('#modeDialog').classList.toggle('on', settings.scenario === 'dialog' || !settings.scenario);
+  $('#modeTour').classList.toggle('on', settings.scenario === 'tour');
+  $('#modeSng').classList.toggle('on', settings.scenario === 'sng');
   $('#tourBar').style.display = tour ? '' : 'none';
   if (tour) renderTourTable();
 }
@@ -350,12 +415,17 @@ async function setScenario(m) {
   await DB.put('kv', settings, 'settings');
   renderTourBar();
   renderChat();
+  $('#tourBar').innerHTML = '';
+  renderTourBar();
   sys(m === 'tour'
     ? 'Сценарий «Турнир». Назовите карты — начнётся новая раздача, баттон сдвинется сам. «Отмена» — отменить последнюю фразу.'
+    : m === 'sng'
+    ? 'Сценарий «Sit&Go» (Spin & Gold). Выберите формат, множитель, стек и позицию и нажмите «Начать». Дальше — как в «Турнире»: карты, действия, «отмена».'
     : 'Обычный диалог. Если стол заполнен, тренер его учитывает.');
 }
 $('#modeDialog').onclick = () => setScenario('dialog');
 $('#modeTour').onclick = () => setScenario('tour');
+$('#modeSng').onclick = () => setScenario('sng');
 function afterAnswer() {
   if (rec) return;
   setState('idle');
@@ -421,6 +491,14 @@ function scrollDown() { chatEl.scrollTop = chatEl.scrollHeight; }
 function renderChat() {
   chatEl.innerHTML = '';
   const h = session.data.history;
+  if (!h.length && settings.scenario === 'sng') {
+    chatEl.innerHTML = `<div class="empty"><b>Сценарий «Sit&Go»</b><br><br>
+      Выберите над чатом формат (3 или 6 игроков), множитель, стек и свою позицию — и нажмите «Начать».<br><br>
+      Дальше каждой фразой называйте карты: «туз король одномастные». Действия: «игрок 2 олл-ин», «игрок 3 фолд».
+      Блайнды выросли — «блайнды 15 30», стеки пересчитаются сами. Вылет — «игрок 3 вылетел».
+      Тренер учитывает выплаты множителя и баббл.</div>`;
+    return;
+  }
   if (!h.length && settings.scenario === 'tour') {
     chatEl.innerHTML = `<div class="empty"><b>Сценарий «Турнир»</b><br><br>
       Сначала состав стола: «турнир на 18, за столом 6, я на баттоне, у меня 15». Все стеки и ставки — в больших блайндах.<br><br>
@@ -467,8 +545,9 @@ const H_NAMES = { hero_position: 'Позиция', hero_cards: 'Карты', her
 function renderCard() {
   const d = session.data;
   $('#cardTourney').innerHTML = kvHtml(d.tournament, T_NAMES);
-  $('#cardTableWrap').style.display = d.tour && d.tour.seats && d.tour.seats.length ? '' : 'none';
-  $('#cardTable').textContent = d.tour && d.tour.seats && d.tour.seats.length ? TourEngine.describe(d.tour) : '';
+  const ct = (settings.scenario === 'sng' ? d.sngTour : d.tour);
+  $('#cardTableWrap').style.display = ct && ct.seats && ct.seats.length ? '' : 'none';
+  $('#cardTable').textContent = ct && ct.seats && ct.seats.length ? TourEngine.describe(ct) + (ct.sng ? '\n' + SNG.context(ct) : '') : '';
   $('#cardHands').innerHTML = d.hands.map(h => `<div class="item ${h.id === d.current_hand ? 'current' : ''}" data-hand="${h.id}">
       <div class="grow">№${h.id} ${esc(h.summary || [h.hero_position, h.hero_cards].filter(Boolean).join(', '))}</div></div>`).join('')
     || '<div class="hint">Пока нет — начните рассказывать раздачу.</div>';

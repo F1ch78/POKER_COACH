@@ -78,6 +78,12 @@
   #modeBar button.on { background: var(--accent); color: var(--fg); font-weight: 600; }
   #tourBar { margin: 8px 12px 0; padding: 8px 10px; background: var(--panel); border-radius: 12px; }
   #tourBar .hint { margin: 0; }
+  .sng-row { display: flex; flex-wrap: wrap; align-items: center; gap: 5px; margin-bottom: 7px; }
+  .sng-row > span { width: 72px; color: var(--muted); font-size: 13px; }
+  .chip { padding: 5px 9px; font-size: 13px; border-radius: 8px; background: var(--bg); border: 1px solid var(--line); }
+  .chip small { color: var(--muted); font-size: 10px; }
+  .chip.on { background: var(--accent); border-color: var(--accent2); }
+  .chip.on small { color: var(--fg); }
   .tt-head { display: flex; align-items: center; gap: 4px; font-size: 13px; color: var(--muted); }
   .tt-head span { flex: 1; min-width: 0; }
   .tt-head button { padding: 3px 8px; font-size: 14px; background: transparent; }
@@ -125,7 +131,7 @@
   <button data-open="settings" aria-label="Настройки">⚙</button>
 </header>
 
-<div id="modeBar"><button id="modeDialog">Диалог</button><button id="modeTour">Турнир</button></div>
+<div id="modeBar"><button id="modeDialog">Диалог</button><button id="modeTour">Турнир</button><button id="modeSng">Sit&amp;Go</button></div>
 <div id="tourBar" style="display:none"></div>
 <div id="chat"></div>
 <div id="status"></div>
@@ -199,6 +205,8 @@
 <script src="store.js"></script>
 <script src="kb.js"></script>
 <script src="tour-engine.js"></script>
+<script src="icm.js"></script>
+<script src="sng.js"></script>
 <script src="brain.js"></script>
 <script src="app.js"></script>
 </body>

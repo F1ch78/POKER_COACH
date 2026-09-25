@@ -21,6 +21,12 @@ Spin&Go — турнир на трёх игроков с короткими ст
 ## Против слабых оппонентов
 Против пассивных игроков, которые часто коллируют, больше ставок на вэлью и меньше блефов. Против тайтовых игроков, которые часто фолдят, — шире пуш и больше краж блайндов.`;
 
+// Справочники, которые приезжают вместе с приложением (добавляются в «Базу» автоматически)
+const BUNDLED_DOCS = [
+  { file: 'spin_gold.md', name: 'Spin & Gold (PokerOK) — правила и выплаты', version: '1' },
+  { file: 'turniry.md', name: 'Покерные турниры — справочник', version: '1' },
+];
+
 const KB = {
   chunks: [], // {src, text, tf: Map, len}
   idf: new Map(),
@@ -54,6 +60,18 @@ const KB = {
       await DB.put('kv', true, 'kb_initialized');
       docs = await DB.all('kb');
     }
+    // встроенные справочники: один раз на версию (если пользователь удалил — не возвращаем)
+    for (const b of BUNDLED_DOCS) {
+      const key = 'bundled:' + b.file;
+      if ((await DB.get('kv', key)) === b.version) continue;
+      try {
+        const r = await fetch(b.file, { cache: 'no-cache' });
+        if (!r.ok) continue;
+        await DB.put('kb', { name: b.name, chunks: this.chunk(await r.text()), added: new Date().toISOString() });
+        await DB.put('kv', b.version, key);
+      } catch (e) { /* нет сети — попробуем в следующий раз */ }
+    }
+    docs = await DB.all('kb');
     this.chunks = [];
     for (const d of docs) for (const t of d.chunks) this.chunks.push({ src: d.name, text: t });
     this.index();

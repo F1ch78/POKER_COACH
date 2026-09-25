@@ -1,7 +1,7 @@
 // Офлайн-кэш оболочки приложения. Запросы к Claude не кэшируются.
-const VERSION = 'coach-v5';
-const SHELL = ['./', 'index.html', 'app.js', 'brain.js', 'kb.js', 'tour-engine.js', 'store.js', 'poker.js', 'ranking.js',
-  'manifest.json', 'icon-192.png', 'icon-512.png'];
+const VERSION = 'coach-v6';
+const SHELL = ['./', 'index.html', 'app.js', 'brain.js', 'kb.js', 'tour-engine.js', 'icm.js', 'sng.js', 'store.js', 'poker.js', 'ranking.js',
+  'manifest.json', 'icon-192.png', 'icon-512.png', 'spin_gold.md', 'turniry.md'];
 self.addEventListener('install', e => {
   e.waitUntil(caches.open(VERSION).then(c => c.addAll(SHELL)).then(() => self.skipWaiting()));
 });

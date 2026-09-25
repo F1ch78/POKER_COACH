@@ -123,9 +123,11 @@ class Brain {
 
   system(userText) {
     const parts = [SYSTEM_PROMPT, '\n=== КАРТОЧКА СЕССИИ ===\n' + this.session.cardText()];
-    const tour = this.session.data.tour;
+    const sc = this.settings.scenario;
+    const tour = sc === 'sng' ? this.session.data.sngTour : this.session.data.tour;
     if (tour && tour.seats && tour.seats.length && window.TourEngine)
-      parts.push('\n=== СТОЛ СЦЕНАРИЯ «ТУРНИР» (точные данные, позиции посчитаны приложением) ===\n' + TourEngine.describe(tour));
+      parts.push(`\n=== СТОЛ СЦЕНАРИЯ «${sc === 'sng' ? 'SIT&GO' : 'ТУРНИР'}» (точные данные, позиции посчитаны приложением) ===\n` + TourEngine.describe(tour) +
+        (tour.sng && window.SNG ? '\n' + SNG.context(tour) : ''));
     const hand = this.session.currentHand();
     const hits = KB.search(userText + ' ' + (hand && hand.summary || ''), 3);
     if (hits.length) parts.push('\n=== ИЗ БАЗЫ ЗНАНИЙ УЧЕНИКА ===\n' + hits.map(h => `[${h.src}]\n${h.text}`).join('\n---\n'));
@@ -335,9 +337,9 @@ class Brain {
   }
 
   // Быстрый совет в сценарии «Турнир»: один потоковый запрос без инструментов и истории
-  async advise(situation, onText) {
+  async advise(situation, onText, system) {
     let out = '';
-    await this.streamOnce({ model: this.settings.model, max_tokens: 300, system: TourEngine.ADVICE_SYSTEM,
+    await this.streamOnce({ model: this.settings.model, max_tokens: 300, system: system || TourEngine.ADVICE_SYSTEM,
       messages: [{ role: 'user', content: situation }] }, t => { out += t; onText(t); });
     return out.trim();
   }
