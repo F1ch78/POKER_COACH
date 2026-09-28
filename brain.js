@@ -124,10 +124,10 @@ class Brain {
   system(userText) {
     const parts = [SYSTEM_PROMPT, '\n=== КАРТОЧКА СЕССИИ ===\n' + this.session.cardText()];
     const sc = this.settings.scenario;
-    const tour = sc === 'sng' ? this.session.data.sngTour : this.session.data.tour;
+    const tour = sc === 'sng' ? this.session.data.sngTour : sc === 'cash' ? this.session.data.cashTour : this.session.data.tour;
     if (tour && tour.seats && tour.seats.length && window.TourEngine)
-      parts.push(`\n=== СТОЛ СЦЕНАРИЯ «${sc === 'sng' ? 'SIT&GO' : 'ТУРНИР'}» (точные данные, позиции посчитаны приложением) ===\n` + TourEngine.describe(tour) +
-        (tour.sng && window.SNG ? '\n' + SNG.context(tour) : ''));
+      parts.push(`\n=== СТОЛ СЦЕНАРИЯ «${sc === 'sng' ? 'SIT&GO' : sc === 'cash' ? 'КЭШ' : 'ТУРНИР'}» (точные данные, позиции посчитаны приложением) ===\n` + TourEngine.describe(tour) +
+        (tour.sng && window.SNG ? '\n' + SNG.context(tour) : tour.cash && window.CASH ? '\n' + CASH.context(tour) : ''));
     const hand = this.session.currentHand();
     const hits = KB.search(userText + ' ' + (hand && hand.summary || ''), 3);
     if (hits.length) parts.push('\n=== ИЗ БАЗЫ ЗНАНИЙ УЧЕНИКА ===\n' + hits.map(h => `[${h.src}]\n${h.text}`).join('\n---\n'));
