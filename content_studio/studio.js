@@ -564,8 +564,8 @@ function renderBoard() {
       sc.narration.length ? field('Закадровый текст сцены (субтитры поверх всех шотов)', area(sc.narration.join('\n'), v => { sc.narration = v.split('\n').filter(Boolean); }, 3)) : null,
       h('div', { class: 'row wrap' },
         btn(S.busy ? S.busy + '…' : 'ИИ: английские описания шотов', () => aiScene(sc), 'primary', 'Claude переводит действие каждого шота в визуальное описание для генераторов'),
-        btn('⧉ Все промпты картинок', () => copy(sc.shots.map(sh => `### ${Prompts.code(sc, sh)}\n${Prompts.image(p, sc, sh)}`).filter(s => !/\n$/.test(s)).join('\n\n'), 'Промпты картинок')),
-        btn('⧉ Все промпты видео', () => copy(sc.shots.map(sh => `### ${Prompts.code(sc, sh)}\n${Prompts.video(p, sc, sh)}`).filter(s => !/\n$/.test(s)).join('\n\n'), 'Промпты видео')),
+        btn('⧉ Все промпты картинок', () => copy(sc.shots.map(sh => [sh, Prompts.image(p, sc, sh)]).filter(([, t]) => t).map(([sh, t]) => promptTagOn() ? promptTag(sc, sh) + t : `### ${Prompts.code(sc, sh)}\n${t}`).join('\n\n'), 'Промпты картинок')),
+        btn('⧉ Все промпты видео', () => copy(sc.shots.map(sh => [sh, Prompts.video(p, sc, sh)]).filter(([, t]) => t).map(([sh, t]) => promptTagOn() ? promptTag(sc, sh) + t : `### ${Prompts.code(sc, sh)}\n${t}`).join('\n\n'), 'Промпты видео')),
         btn(`🎨 Картинки сцены (${emptyShots([sc]).length})`, () => genBatch(emptyShots([sc])), '', 'Сгенерировать картинки для шотов сцены, где их ещё нет'),
         btn(`🎬 Видео сцены (${noVideoShots([sc]).length})`, () => genBatch(noVideoShots([sc]), 'video'), '', 'Оживить кадры сцены, где ещё нет видео (через сервис видео из ⚙)'),
         btn('Ассеты пачкой', async () => bulkAssets(await pickFile('image/*,video/*,audio/*', true)), '', 'Файлы с именами S05_03.png, S05_03.mp4 разложатся по шотам'),
@@ -595,6 +595,7 @@ function filterBar(sc) {
     Object.entries(FILTERS).map(([k, f]) => h('button', { class: 'chip' + (S.filter === k ? ' on' : ''), onclick: () => { S.filter = k; render(); } },
       `${f.label} · ${sc.shots.filter(f.test).length}`)),
     h('span', { class: 'grow' }),
+    promptTagToggle(),
     h('span', { class: 'muted small' }, 'Щёлкните по шоту и нажмите Ctrl+V, чтобы вставить картинку или видео из буфера'));
 }
 
@@ -671,8 +672,8 @@ function shotCard(sc, sh, i) {
         area(sh.en, v => { sh.en = v; }, 2, 'Кадр по-английски (для генератора). Пусто — пойдёт русский текст'),
         area(sh.motion, v => { sh.motion = v; }, 2, 'Движение в шоте по-английски (для видео)')) : null,
       picture ? h('div', { class: 'row wrap' },
-        btn('⧉ Промпт картинки', () => copy(Prompts.image(p, sc, sh), 'Промпт картинки ' + code), 'chip' + (Prompts.isEnglish(Prompts.description(sh)) ? '' : ' warnchip'), Prompts.isEnglish(Prompts.description(sh)) ? '' : 'Описание кадра ещё на русском'),
-        btn('⧉ Промпт видео', () => copy(videoApiPrompt(sc, sh, !!sh.assets.image), 'Промпт видео ' + code), 'chip', `Под лимит ${videoLimit() || '—'} символов; с кадром шота — без описаний героев и места`),
+        btn('⧉ Промпт картинки', () => copy(copyImagePrompt(sc, sh), 'Промпт картинки ' + code), 'chip' + (Prompts.isEnglish(Prompts.description(sh)) ? '' : ' warnchip'), Prompts.isEnglish(Prompts.description(sh)) ? '' : 'Описание кадра ещё на русском'),
+        btn('⧉ Промпт видео', () => copy(copyVideoPrompt(sc, sh, !!sh.assets.image), 'Промпт видео ' + code), 'chip', `Под лимит ${videoLimit() || '—'} символов; с кадром шота — без описаний героев и места`),
         btn('Промпты ▾', showPrompts, 'chip ghost'),
         h('span', { class: 'grow' }),
         btn(genBusy.has(sh.id) ? '🎨 …' : sh.assets.image ? '🎨 ещё вариант' : '🎨 Сгенерировать', () => genOne(sc, sh), 'chip gen', 'Сгенерировать картинку по промпту с референсами героев и локации'),
@@ -768,6 +769,20 @@ const videoLimit = () => +AI.videoSettings().maxPrompt || 0;
 function videoApiPrompt(sc, sh, hasFrame) {
   return Prompts.videoFit(S.p, sc, sh, { limit: videoLimit(), hasFrame });
 }
+
+// Промпты для копирования начинаются с кода шота: [S05_03] — так их легко узнать на сайте генератора и в истории.
+// В автоматические запросы к сервисам код не добавляется.
+const promptTagOn = () => S.conv.tag !== false;
+const promptTag = (sc, sh) => `[${Prompts.code(sc, sh)}]\n`;
+const tagged = (sc, sh, text) => promptTagOn() && text ? promptTag(sc, sh) + text : text;
+const copyImagePrompt = (sc, sh) => tagged(sc, sh, Prompts.image(S.p, sc, sh));
+// Видео: код шота входит в лимит символов сайта, поэтому сам промпт ужимается на его длину.
+function copyVideoPrompt(sc, sh, hasFrame) {
+  const lim = videoLimit(), tag = promptTagOn() ? promptTag(sc, sh).length : 0;
+  return tagged(sc, sh, Prompts.videoFit(S.p, sc, sh, { limit: lim ? Math.max(1, lim - tag) : 0, hasFrame }));
+}
+const promptTagToggle = () => h('label', { class: 'check', title: 'Каждый скопированный промпт начинается с кода шота, например [S05_03]. В автоматическую генерацию код не попадает.' },
+  h('input', { type: 'checkbox', checked: promptTagOn(), onchange: e => { S.conv.tag = e.target.checked; saveUi(); render(); } }), 'код шота в начале промпта');
 
 async function genVideoShot(sc, sh, onProgress, shouldStop) {
   const frame = sh.assets.image ? await frameData(sh.assets.image) : null;
@@ -941,7 +956,7 @@ function convGo(step, onlyTodo) {
   if (S.conv.autoCopy) convCopy();
 }
 
-function convPrompt(c) { return S.conv.mode === 'image' ? Prompts.image(S.p, c.sc, c.sh) : videoApiPrompt(c.sc, c.sh, !!c.sh.assets.image); }
+function convPrompt(c) { return S.conv.mode === 'image' ? copyImagePrompt(c.sc, c.sh) : copyVideoPrompt(c.sc, c.sh, !!c.sh.assets.image); }
 function convCopy() { const { cur } = convCurrent(); if (cur) copy(convPrompt(cur), `Промпт ${Prompts.code(cur.sc, cur.sh)}`); }
 
 async function convAttach(files) {
@@ -1031,7 +1046,8 @@ function renderConveyor() {
       h('input', { type: 'checkbox', checked: !!S.conv.watch && S.bridgeOk, disabled: !S.bridgeOk,
         onchange: e => { S.conv.watch = e.target.checked; WATCH.since = Date.now() - 1000; saveUi(); render(); } }),
       '👀 подхватывать скачанное из «Загрузок»'),
-    h('label', { class: 'check' }, h('input', { type: 'checkbox', checked: S.conv.autoCopy, onchange: e => { S.conv.autoCopy = e.target.checked; saveUi(); } }), 'копировать промпт при переходе'));
+    h('label', { class: 'check' }, h('input', { type: 'checkbox', checked: S.conv.autoCopy, onchange: e => { S.conv.autoCopy = e.target.checked; saveUi(); } }), 'копировать промпт при переходе'),
+    promptTagToggle());
   if (!cur) return h('div', { class: 'page' }, top);
   const { sc, sh } = cur;
   const chars = Prompts.characters(p, sc, sh), loc = Prompts.location(p, sc);
