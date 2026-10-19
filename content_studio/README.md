@@ -4,7 +4,7 @@
 
 ## Запуск
 
-1. Скачайте архив ветки ([zip](https://github.com/F1ch78/POKER_COACH/archive/refs/heads/claude/bold-heisenberg-6149o0.zip)) и распакуйте его.
+1. Скачайте архив ветки ([zip](https://github.com/F1ch78/POKER_COACH/archive/refs/heads/claude/awesome-davinci-w8c10j.zip)) и распакуйте его.
 2. В папке `content_studio` дважды щёлкните **`start-studio.bat`**. Откроется чёрное окно моста и сама студия по адресу `http://localhost:8787`.
 3. Работайте в студии, а окно моста не закрывайте: в нём видно каждый запрос к ИИ.
 
