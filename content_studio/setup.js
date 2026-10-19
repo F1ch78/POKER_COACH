@@ -65,7 +65,22 @@ function openSetup(isNew) {
   const p = isNew ? null : S.p;
   const have = Object.assign({}, p ? (p.have || guessHave(p)) : {});
   const files = {}, texts = {};
+  const conv = { on: true };
   const name = h('input', { type: 'text', value: p ? p.name : 'Новый фильм' });
+  const allList = h('span', { class: 'muted small' }, 'можно несколько файлов сразу');
+  const pickAll = async () => {
+    const got = await pickFile('.md,.txt,.markdown', true);
+    if (!got.length) return;
+    files.all = (files.all || []).concat(got);
+    fill(allList, h('span', { class: 'small' }, '✓ ' + files.all.map(f => f.name).join(', ')));
+  };
+  const allBox = h('div', { class: 'setup-all' },
+    h('h4', {}, 'Всё, что есть'),
+    h('p', { class: 'muted small' }, 'Загрузите разом все документы проекта в любом виде: сценарий, библию, раскадровку, промпты, заметки. Студия сохранит их как есть, а ИИ переложит в её формат и заполнит, что сможет: паспорт и идею, стиль, героев, плейты, сцены, шот-лист, голоса и английские описания шотов.'),
+    h('div', { class: 'row wrap' }, btn('📄 Загрузить файлы (.md, .txt)', pickAll, 'small'), allList),
+    h('textarea', { rows: 3, placeholder: 'или вставьте текст сюда', oninput: e => { texts.all = e.target.value; } }),
+    h('label', { class: 'check' }, h('input', { type: 'checkbox', checked: true, onchange: e => { conv.on = e.target.checked; } }),
+      h('span', {}, 'Переложить под студию через ИИ'), h('span', { class: 'muted small' }, ' — нужен ключ в ⚙ или режим «Через Chatbox»')));
   const order = h('div', { class: 'muted small setup-order' });
   const showOrder = () => {
     const tabs = projectTabs({ have, scenes: [] });
@@ -100,19 +115,20 @@ function openSetup(isNew) {
   const dlg = h('dialog', { class: 'setup' },
     h('h3', {}, isNew ? 'Новый проект' : 'Что есть в проекте'),
     field('Название', name),
+    allBox,
     h('p', { class: 'muted' }, 'Отметьте, что у вас уже есть. Проект может начинаться с любой стадии: студия покажет только нужные разделы в нужном порядке. Документы можно загрузить прямо здесь.'),
     ['Разработка', 'Производство'].map(g => [h('h4', {}, g), HAVE.filter(x => x.group === g).map(row)]),
     order,
     h('div', { class: 'row' },
       h('span', { class: 'grow' }),
       btn('Отмена', () => dlg.close(), 'ghost'),
-      btn(isNew ? 'Создать проект' : 'Сохранить', async () => { done = true; dlg.close(); await applySetup(isNew, name.value.trim() || 'Новый фильм', have, files, texts); }, 'primary')));
+      btn(isNew ? 'Создать проект' : 'Сохранить', async () => { done = true; dlg.close(); await applySetup(isNew, name.value.trim() || 'Новый фильм', have, files, texts, conv.on); }, 'primary')));
   showOrder();
   dlg.addEventListener('close', () => dlg.remove());
   document.body.append(dlg); dlg.showModal();
 }
 
-async function applySetup(isNew, name, have, files, texts) {
+async function applySetup(isNew, name, have, files, texts, convert) {
   if (isNew) {
     await flush();
     const np = newProject(name); await DB.saveProject(np); S.list.unshift(np); selectProject(np.id);
@@ -120,25 +136,34 @@ async function applySetup(isNew, name, have, files, texts) {
   const p = S.p;
   p.have = Object.assign({}, have); p.setup = true;
   const read = async k => have[k] ? (files[k] && files[k][0] ? await files[k][0].text() : (texts[k] || '').trim()) : '';
-  const done = [];
+  const done = [], sources = [];
   if (have.idea && texts.idea != null) devConf().idea = texts.idea.trim();
+  for (const f of files.all || []) { const text = await f.text(); if (text.trim()) { sources.push({ name: f.name, text }); done.push(importDoc(f.name, text)); } }
+  if ((texts.all || '').trim()) { sources.push({ name: 'materialy.md', text: texts.all }); done.push(importDoc('materialy.md', texts.all)); }
   // Порядок важен: герои и локации до сценария, сценарий до шот-листа, сцены до файлов.
   for (const k of ['world', 'cast', 'plan', 'script']) {
     const text = await read(k);
     if (!text) continue;
     if (k === 'plan') devConf().steps.plan = text;
     const fileName = files[k] && files[k][0] ? files[k][0].name : `${k}.md`;
+    sources.push({ name: fileName, text });
+    if (convert) { done.push(importDoc(fileName, text)); continue; }
     if (k === 'script' && Parser.detectKind(text) !== 'script') { toast('Сценарий не распознан: нужны строки «СЦЕНА 1. МЕСТО - ВРЕМЯ» и ракурсы в квадратных скобках. Он сохранён как справка.'); }
     if (k === 'cast' && Parser.detectKind(text) !== 'cast') { toast('Каст-библия не распознана: нужны блоки кода с SET: / LOOK: / STYLE:. Она сохранена как справка.'); }
     done.push(importDoc(fileName, text));
   }
   const shots = await read('shots');
-  if (shots) { devConf().steps.shots = shots; if (p.scenes.length) devApplyShots(); }
+  if (shots) { sources.push({ name: 'shot-list.md', text: shots }); devConf().steps.shots = shots; if (p.scenes.length) devApplyShots(); }
+  if (have.idea && (texts.idea || '').trim()) sources.push({ name: 'ideya.md', text: texts.idea });
   const media = ['images', 'video', 'voice'].flatMap(k => have[k] ? files[k] || [] : []);
   if (media.length) await bulkAssets(media);
   if (have.sound && files.sound && files.sound.length) await soundUpload(files.sound);
   touch();
+  if (done.length) toast('Загружено: ' + done.join('; '));
+  if (convert && sources.length) {
+    const made = await convertMaterials(sources);
+    if (made.length) toast('ИИ заполнил: ' + made.join(', '));
+  }
   S.tab = landingTab(p);
   render(); window.scrollTo(0, 0);
-  if (done.length) toast('Загружено: ' + done.join('; '));
 }

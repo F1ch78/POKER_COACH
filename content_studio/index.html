@@ -91,6 +91,8 @@
   .setup-item .check { gap: 8px; }
   .setup-extra { margin: 6px 0 0 26px; display: grid; gap: 6px; }
   .setup-extra:empty { display: none; }
+  .setup-all { margin: 10px 0; padding: 10px; border-radius: 10px; border: 1px dashed var(--line); display: grid; gap: 8px; }
+  .setup-all h4 { margin: 0; }
   .setup-order { margin: 12px 0; padding: 10px; border-radius: 10px; background: var(--panel2); }
   .dev-step.done { border-left: 4px solid var(--st-ok); }
   .dev-refs { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 10px; margin: 8px 0; }
@@ -266,6 +268,7 @@
 <script src="sound.js"></script>
 <script src="review.js"></script>
 <script src="dev.js"></script>
+<script src="convert.js"></script>
 <script src="setup.js"></script>
 <script src="studio.js"></script>
 <script>if ('serviceWorker' in navigator && location.protocol === 'https:') navigator.serviceWorker.register('sw.js').catch(() => {});</script>
