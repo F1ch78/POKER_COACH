@@ -320,7 +320,8 @@ function aiContext() {
 async function busy(label, fn) {
   if (S.busy) return toast('Подождите: ' + S.busy);
   S.busy = label; render();
-  try { await fn(); } catch (e) { toast(e.message || String(e)); console.error(e); }
+  const job = Activity.task(label, 'run');
+  try { await fn(); job.done(); } catch (e) { job.fail(e.message || String(e)); toast(e.message || String(e), true); console.error(e); }
   S.busy = ''; touch(); render();
 }
 
@@ -355,7 +356,9 @@ const aiAllScenes = () => busy('ИИ описывает все сцены', asyn
 });
 
 // ---------------------------------------------------------------- общие элементы
-function toast(msg) {
+// toast(msg, true) — не дублировать в истории (ошибку уже записала задача).
+function toast(msg, quiet) {
+  if (!quiet) Activity.add(msg, /ошибк|не удалось|нет связи|не распознан|отказал/i.test(msg) ? 'err' : 'done');
   const box = $('#toasts'), t = h('div', { class: 'toast' }, msg);
   box.append(t);
   while (box.children.length > 3) box.firstChild.remove();
@@ -852,6 +855,7 @@ async function genBatch(items, kind = 'image') {
   if (GEN.running) return toast('Генерация уже идёт — дождитесь или остановите её');
   if (!items.length) return toast(kind === 'video' ? 'Нечего генерировать: у всех шотов уже есть видео' : 'Нечего генерировать: у всех шотов уже есть картинки');
   Object.assign(GEN, { running: true, kind, stop: false, queue: items.slice(), current: [], done: 0, total: items.length, errors: [], status: {} });
+  const jobs = new Map(items.map(it => [it, Activity.task(`${KIND[kind].icon} ${Prompts.code(it.sc, it.sh)}`)]));
   render();
   const conf = kind === 'video' ? AI.videoSettings() : AI.imageSettings();
   const n = Math.max(1, Math.min(4, +conf.concurrency || (kind === 'video' ? 1 : 2)));
@@ -859,10 +863,13 @@ async function genBatch(items, kind = 'image') {
     while (!GEN.stop && GEN.queue.length) {
       const it = GEN.queue.shift();
       GEN.current.push(it); renderGenBar();
+      const job = jobs.get(it); job.start();
       try {
         if (kind === 'video') await genVideoShot(it.sc, it.sh, t => { GEN.status[it.sh.id] = t; renderGenBar(); }, () => GEN.stop);
         else await genShot(it.sc, it.sh);
+        job.done();
       } catch (e) {
+        job.fail(e.message);
         if (!GEN.stop || e.message !== 'Остановлено') GEN.errors.push(`${Prompts.code(it.sc, it.sh)}: ${e.message}`);
         if ([401, 402, 403].includes(e.status) || e.network) GEN.stop = true;
       }
@@ -873,6 +880,7 @@ async function genBatch(items, kind = 'image') {
     }
   };
   await Promise.all(Array.from({ length: n }, worker));
+  jobs.forEach(j => { if (j.state === 'queue') j.fail('остановлено'); });
   GEN.running = false;
   toast(GEN.errors.length ? `${KIND[kind].many}: готово с ошибками (${GEN.errors.length})` : `Готово ${KIND[kind].done}: ${GEN.done}`);
   render();
@@ -895,12 +903,13 @@ async function genOne(sc, sh, kind = 'image') {
   if (genBusy.has(sh.id)) return;
   genBusy.set(sh.id, '…'); render();
   const code = Prompts.code(sc, sh);
+  const job = Activity.task(`${kind === 'video' ? '🎬' : '🖼'} ${code}`, 'run');
   try {
     if (kind === 'video') {
       await genVideoShot(sc, sh, t => { genBusy.set(sh.id, t); updateBusyLabels(sh.id); });
-      toast(code + ': видео готово');
-    } else { await genShot(sc, sh); toast(code + ': картинка готова'); }
-  } catch (e) { toast(code + ': ' + e.message); }
+      job.done('видео готово'); toast(code + ': видео готово', true);
+    } else { await genShot(sc, sh); job.done('картинка готова'); toast(code + ': картинка готова', true); }
+  } catch (e) { job.fail(e.message); toast(code + ': ' + e.message, true); }
   genBusy.delete(sh.id); render();
 }
 // Прогресс долгого видео обновляем точечно, не перерисовывая страницу.

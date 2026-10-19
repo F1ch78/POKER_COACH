@@ -161,11 +161,18 @@ async function convertMaterials(sources) {
   const p = S.p, d = devConf();
   const src = convertSource(sources);
   const made = [];
-  const step = label => { S.busy = 'ИИ перекладывает материалы: ' + label; render(); };
+  // Этапы видны в истории: сразу все в очереди, дальше по одному.
+  const jobs = {}, plan = [['pass', 'паспорт проекта'], ['cast', 'стиль, герои и плейты'], ['scenes', 'текст сцен'], ['shots', 'шот-лист'], ['voices', 'голоса героев'], ['en', 'английские описания']];
+  for (const [k, label] of plan) jobs[k] = Activity.task('ИИ: ' + label);
+  let cur = null;
+  const step = (label, k) => { if (k && jobs[k] !== cur) { if (cur && cur.state === 'run') cur.done(); cur = jobs[k]; cur.start(); } S.busy = 'ИИ перекладывает материалы: ' + label; render(); };
+  const skip = (k, why) => jobs[k].done(why);
+  const finish = (k, note) => { jobs[k].done(note); if (cur === jobs[k]) cur = null; };
   const ask = (user, maxTokens = 16000, schema) => AI.call({ system: DEV_SYSTEM, user, maxTokens, schema });
 
   await busy('ИИ перекладывает материалы под студию', async () => {
-    step('паспорт проекта');
+   try {
+    step('паспорт проекта', 'pass');
     const pass = await ask(convertPassportAsk(src), 3000, PASSPORT_SCHEMA);
     if (pass && typeof pass === 'object') {
       if (!d.idea && pass.idea) d.idea = pass.idea;
@@ -177,21 +184,23 @@ async function convertMaterials(sources) {
       made.push('паспорт');
       touch();
     }
+    finish('pass');
 
     if (!p.characters.length || !p.locations.length) {
-      step('стиль, герои и плейты');
+      step('стиль, герои и плейты', 'cast');
       const text = await ask(convertCastAsk(src));
       d.steps.cast = text;
       if (Parser.detectKind(text) === 'cast') { importDoc('studio_kast.md', text); made.push(`героев ${p.characters.filter(c => !c.variantOf).length}, мест ${p.locations.length}`); }
       else toast('ИИ вернул каст-библию не в формате студии — она в «Разработке», шаг 2.');
       touch();
-    }
+      finish('cast', `героев ${p.characters.filter(c => !c.variantOf).length}, мест ${p.locations.length}`);
+    } else skip('cast', 'уже есть');
 
     if (!p.scenes.some(sc => sc.shots.length)) {
       let written = '';
       for (let i = 0; i < 12; i++) {
         const nums = [...written.matchAll(/^#{0,4}\s*СЦЕНА\s*(\d+)/gmi)].map(m => +m[1]);
-        step(nums.length ? `текст сцен после ${Math.max(...nums)}-й` : 'текст сцен');
+        step(nums.length ? `текст сцен после ${Math.max(...nums)}-й` : 'текст сцен', 'scenes');
         const part = String(await ask(convertScenesAsk(src, written))).trim();
         if (!part) break;
         const before = nums.length;
@@ -204,7 +213,8 @@ async function convertMaterials(sources) {
       if (Parser.detectKind(written) === 'script') { importDoc('studio_sceny.md', written); made.push(`сцен ${p.scenes.length}`); }
       else toast('ИИ вернул текст сцен не в формате студии — он в «Разработке», шаг 4.');
       touch();
-    }
+      finish('scenes', `сцен ${p.scenes.length}`);
+    } else skip('scenes', 'уже есть');
 
     if (p.scenes.length && !d.steps.shots) {
       const scenesText = d.steps.scenes || p.docs.filter(x => x.kind === 'script').map(x => x.text).join('\n\n');
@@ -212,36 +222,43 @@ async function convertMaterials(sources) {
       let cards = '';
       for (let i = 0; i < nums.length; i += 4) {
         const from = nums[i], to = nums[Math.min(i + 3, nums.length - 1)];
-        step(`шот-лист, сцены ${from}–${to}`);
+        step(`шот-лист, сцены ${from}–${to}`, 'shots');
         cards = (cards ? cards.trimEnd() + '\n\n' : '') + String(await ask(convertShotsAsk(src, scenesText, from, to))).trim();
       }
       d.steps.shots = cards;
       if (parseShotList(cards).length) { devApplyShots(); made.push(`шотов ${p.scenes.reduce((a, sc) => a + sc.shots.length, 0)}`); }
       touch();
-    }
+      finish('shots', `шотов ${p.scenes.reduce((a, sc) => a + sc.shots.length, 0)}`);
+    } else skip('shots', p.scenes.length ? 'уже есть' : 'нет сцен');
 
     const talks = p.scenes.some(sc => sc.shots.some(sh => sh.dialogue.length));
     if (talks && !d.steps.voices) {
-      step('голоса героев');
+      step('голоса героев', 'voices');
       d.steps.voices = String(await ask(devRequest(DEV_STEPS.find(s => s.k === 'voices')).user, 4000)).trim();
       if (devApplyVoices()) made.push('голоса');
       touch();
-    }
+      finish('voices');
+    } else skip('voices', talks ? 'уже есть' : 'реплик нет');
 
     for (const sc of p.scenes) {
       const pics = sc.shots.filter(sh => !Prompts.noPicture(sh));
       if (!pics.length || pics.every(sh => sh.en && Array.isArray(sh.aiCharacters))) continue;
-      step(`английские описания, сцена ${sc.num} из ${p.scenes.length}`);
+      step(`английские описания, сцена ${sc.num} из ${p.scenes.length}`, 'en');
       applyScene(sc, await AI.describeScene(sc, aiContext(), castNames()), true);
       touch();
     }
     if (p.scenes.some(sc => sc.shots.some(sh => sh.en))) made.push('английские описания');
+    finish('en');
 
     const hv = p.have || {};
     p.have = Object.assign(hv, {
       world: hv.world || p.docs.some(x => x.kind === 'bible'), cast: hv.cast || p.characters.length > 0,
       script: hv.script || p.scenes.length > 0, shots: hv.shots || !!d.steps.shots,
     });
+   } catch (e) {
+    for (const j of Object.values(jobs)) if (j.state === 'run') j.fail(e.message); else if (j.state === 'queue') j.fail('не выполнено');
+    throw e;
+   }
   });
   return made;
 }

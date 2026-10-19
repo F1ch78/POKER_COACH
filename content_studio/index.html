@@ -91,6 +91,23 @@
   .setup-item .check { gap: 8px; }
   .setup-extra { margin: 6px 0 0 26px; display: grid; gap: 6px; }
   .setup-extra:empty { display: none; }
+  body.with-activity { padding-right: 260px; }
+  body.with-activity #toasts { right: 276px; }
+  aside.activity { position: fixed; top: 0; right: 0; bottom: 0; width: 260px; z-index: 6; background: var(--panel); border-left: 1px solid var(--line); display: flex; flex-direction: column; }
+  aside.activity.closed { width: 34px; align-items: center; padding-top: 8px; gap: 10px; }
+  .activity-head { display: flex; align-items: center; gap: 6px; padding: 8px 10px; border-bottom: 1px solid var(--line); }
+  .activity-head b { flex: 1 0 auto; }
+  .activity-head .muted { flex: 1 1 auto; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .activity-list { overflow-y: auto; flex: 1; padding: 4px 0; }
+  .activity-item { display: grid; grid-template-columns: 12px 1fr auto; gap: 8px; align-items: start; padding: 6px 10px; font-size: 12px; line-height: 1.35; border-bottom: 1px solid var(--line); }
+  .activity-text { overflow-wrap: anywhere; }
+  .activity-time { color: var(--muted); font-variant-numeric: tabular-nums; }
+  .dot { display: inline-block; width: 10px; height: 10px; border-radius: 50%; margin-top: 3px; background: #3fb950; box-shadow: 0 0 6px #3fb95088; }
+  .dot.run { background: #e3b341; box-shadow: 0 0 8px #e3b341; animation: dotpulse 1s ease-in-out infinite; }
+  .dot.queue { background: #4c8dff; box-shadow: 0 0 6px #4c8dff88; }
+  .dot.err { background: #f85149; box-shadow: 0 0 6px #f8514988; }
+  @keyframes dotpulse { 50% { opacity: .45; } }
+  @media (max-width: 900px) { body.with-activity { padding-right: 0; } aside.activity:not(.closed) { width: min(300px, 86vw); box-shadow: -8px 0 24px #0008; } }
   .setup-all { margin: 10px 0; padding: 10px; border-radius: 10px; border: 1px dashed var(--line); display: grid; gap: 8px; }
   .setup-all h4 { margin: 0; }
   .setup-order { margin: 12px 0; padding: 10px; border-radius: 10px; background: var(--panel2); }
@@ -268,6 +285,7 @@
 <script src="sound.js"></script>
 <script src="review.js"></script>
 <script src="dev.js"></script>
+<script src="activity.js"></script>
 <script src="convert.js"></script>
 <script src="setup.js"></script>
 <script src="studio.js"></script>
