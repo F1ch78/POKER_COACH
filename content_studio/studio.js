@@ -461,7 +461,7 @@ function renderLibrary() {
       field('STYLE — палитра и фактуры', area(p.style.style, v => { p.style.style = v; }, 6)),
       field('NEGATIVE — чего не должно быть', area(p.style.negative, v => { p.style.negative = v; }, 6))),
 
-    h('h2', {}, 'Герои', btn('+ герой', () => { p.characters.push({ id: uid(), name: 'Новый герой', aliases: ['Новый герой'], tags: '', prompts: [], variantOf: '', scenes: [], ref: '' }); touch(); render(); }, 'ghost')),
+    h('h2', {}, 'Герои', btn('🎨 Нарисовать референсы', genMissingRefs, 'ghost', 'Сервис картинок из ⚙ нарисует лист каждого героя и плейт каждой локации, у которых ещё нет референса'), btn('+ герой', () => { p.characters.push({ id: uid(), name: 'Новый герой', aliases: ['Новый герой'], tags: '', prompts: [], variantOf: '', scenes: [], ref: '' }); touch(); render(); }, 'ghost')),
     h('div', { class: 'cards' }, p.characters.map(characterCard)),
 
     h('h2', {}, 'Локации',
@@ -498,6 +498,8 @@ function characterCard(c) {
         h('div', { class: 'muted small' }, usedIn.length ? 'В кадре в сценах: ' + [...new Set(usedIn)].join(', ') : 'В сценарии не найден'))),
     field('Тег-сет (EN, вставляется в каждый промпт с героем)', area(c.tags, v => { c.tags = v; }, 4)),
     h('div', { class: 'row wrap' },
+      characterSheetPrompt(c) ? btn(refBtnLabel(c, c.ref ? '🎨 Перерисовать референс' : '🎨 Нарисовать референс'), () => { if (!refRunning.has(c.id)) genCharacterRef(c); }, 'chip', 'Лист героя рисует сервис картинок из ⚙; результат станет референсом') : null,
+      (c.prompts || []).filter(pr => !/лист|sheet/i.test(pr.label)).map(pr => btn('🎨 ' + pr.label, () => { if (!refRunning.has(c.id)) genCharacterRef(c, pr); }, 'chip', 'Нарисовать по этому промпту и сделать референсом')),
       (c.prompts || []).map(pr => btn('⧉ ' + pr.label, () => copy(pr.text, 'Промпт «' + pr.label + '»'), 'chip')),
       !c.tags ? btn('ИИ: тег-сет', () => busy('ИИ пишет тег-сет', async () => { c.tags = await AI.characterTags(c.name, aiContext()); }), 'chip') : null,
       h('span', { class: 'grow' }),
@@ -514,6 +516,7 @@ function locationCard(l) {
         h('div', { class: 'muted small' }, scenes.length ? 'Сцены: ' + scenes.map(s => s.num).join(', ') : 'Не назначена ни одной сцене'))),
     field('SET (EN, вставляется в промпты шотов этой локации)', area(l.set, v => { l.set = v; }, 4)),
     h('div', { class: 'row wrap' },
+      locationPlatePrompt(l) ? btn(refBtnLabel(l, l.ref ? '🎨 Перерисовать плейт' : '🎨 Нарисовать плейт'), () => { if (!refRunning.has(l.id)) genLocationRef(l); }, 'chip', 'Плейт рисует сервис картинок из ⚙; результат станет референсом локации') : null,
       l.plate ? btn('⧉ Промпт плейта', () => copy(l.plate, 'Промпт плейта'), 'chip') : null,
       btn(l.set ? 'ИИ: переписать SET' : 'ИИ: написать SET', () => busy('ИИ пишет SET', async () => {
         const txt = scenes.map(sc => `Scene ${sc.num}. ${sc.heading}\n` + sc.shots.map(s => s.text).join('\n')).join('\n\n');
