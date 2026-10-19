@@ -74,14 +74,48 @@ const Prompts = (() => {
     return [s.look && 'LOOK: ' + s.look, s.style && 'STYLE: ' + s.style, s.negative && 'NEGATIVE: ' + s.negative].filter(Boolean).join('\n\n');
   }
 
+  // Под какую нейросеть составлен промпт: fits — для чего он, also — где ещё сработает.
+  const TARGETS = {
+    image: {
+      universal: { label: 'Универсальный', fits: 'GPT Image, Nano Banana (Gemini), Flux', also: 'любой генератор, понимающий длинный промпт' },
+      natural: { label: 'GPT Image / Nano Banana', fits: 'GPT Image (ChatGPT), Nano Banana (Gemini)', also: 'Ideogram, Recraft, Шедеврум' },
+      midjourney: { label: 'Midjourney', fits: 'Midjourney v6–v7', also: 'Niji Journey' },
+      sd: { label: 'Stable Diffusion / Flux', fits: 'Stable Diffusion XL / 3.5, Flux (ComfyUI, Forge)', also: 'Leonardo, Krea, Kandinsky' },
+    },
+    video: {
+      universal: { label: 'Универсальный', fits: 'motion16 и похожие сайты, Hailuo, Wan', also: 'большинство генераторов видео' },
+      kling: { label: 'Kling', fits: 'Kling 2.x', also: 'Hailuo (MiniMax), Wan, Seedance' },
+      runway: { label: 'Runway', fits: 'Runway Gen-4 (картинка → видео, до 1000 символов)', also: 'Luma Ray, Pika' },
+      veo: { label: 'Veo / Sora (со звуком)', fits: 'Google Veo 3, OpenAI Sora 2 — с речью и звуком', also: 'Kling с озвучкой' },
+    },
+  };
+  const target = (kind, t) => TARGETS[kind][t] ? t : 'universal';
+  const aspect = p => { const [w, h] = String((p.render || {}).size || '1920x1080').split('x').map(Number); return w < h ? '9:16' : '16:9'; };
+  const flat = t => String(t || '').replace(/\s*\n+\s*/g, ' ').trim();
+  const dot = t => { t = flat(t); return t && !/[.!?…]$/.test(t) ? t + '.' : t; };
+
   function description(shot) { return (shot.en || shot.text || '').trim(); }
   const isEnglish = s => !/[а-яё]/i.test(s || '');
 
-  function image(p, scene, shot) {
+  function image(p, scene, shot, tgt) {
     if (shot.override && shot.override.image) return shot.override.image;
     if (noPicture(shot)) return '';
     const chars = characters(p, scene, shot);
     const loc = location(p, scene);
+    const t = target('image', tgt);
+    if (t !== 'universal') {
+      const s = p.style || {}, tags = chars.map(c => flat(c.tags)).filter(Boolean), set = loc && loc.set ? flat(loc.set) : '';
+      const cam = camera(scene, shot), what = flat(description(shot)), neg = flat(s.negative);
+      if (t === 'midjourney')
+        return [dot(cam), dot(what), tags.map(dot).join(' '), dot(set), dot(s.look), dot(s.style)].filter(Boolean).join(' ') +
+          ` --ar ${aspect(p)} --style raw` + (neg ? ' --no ' + neg.replace(/\.$/, '') : '');
+      if (t === 'sd')
+        return ['cinematic film still, ' + cam, what, ...tags, set, flat(s.look), flat(s.style)].filter(Boolean).map(x => x.replace(/\.$/, '')).join(', ') +
+          (neg ? '\n\nNegative prompt: ' + neg : '');
+      return [`A cinematic film still. ${dot(cam)} ${dot(what)}`, tags.length && 'Characters: ' + tags.map(dot).join(' '), set && 'Setting: ' + dot(set),
+        (s.look || s.style) && 'Look and style: ' + [dot(s.look), dot(s.style)].filter(Boolean).join(' '),
+        `Frame: a single horizontal ${aspect(p)} film frame.` + (neg ? ' Avoid: ' + dot(neg) : '') + ' No text, no captions, no watermark.'].filter(Boolean).join('\n\n');
+    }
     const parts = [camera(scene, shot) + '. ' + description(shot)];
     if (chars.length) parts.push(chars.map(c => c.tags).filter(Boolean).join('\n'));
     if (loc && loc.set) parts.push('SET: ' + loc.set);
@@ -90,9 +124,10 @@ const Prompts = (() => {
     return parts.join('\n\n');
   }
 
-  function video(p, scene, shot) {
+  function video(p, scene, shot, tgt) {
     if (shot.override && shot.override.video) return shot.override.video;
     if (noPicture(shot)) return '';
+    if (target('video', tgt) !== 'universal') return videoFit(p, scene, shot, { target: tgt });
     const chars = characters(p, scene, shot);
     const loc = location(p, scene);
     const moving = /движется|moving|handheld/i.test(scene.type);
@@ -115,49 +150,69 @@ const Prompts = (() => {
   const firstItems = (t, n) => String(t || '').split(/,\s*/).slice(0, n).join(', ');
 
   function videoFit(p, scene, shot, opts) {
-    const { limit = 0, hasFrame = false } = opts || {};
+    let { limit = 0, hasFrame = false } = opts || {};
+    const t = target('video', (opts || {}).target);
     if (shot.override && shot.override.video) return shot.override.video;
     if (noPicture(shot)) return '';
+    if (t === 'runway') limit = limit ? Math.min(limit, 1000) : 1000;
     const s = p.style || {};
     const moving = /движется|moving|handheld/i.test(scene.type);
-    const spoken = shot.dialogue.filter(d => !d.vo).map(d => '«' + d.line.replace(/^\([^)]*\)\s*/, '') + '»').join(' ');
+    const said = d => '«' + d.line.replace(/^\([^)]*\)\s*/, '') + '»';
+    const spoken = shot.dialogue.filter(d => !d.vo).map(said).join(' ');
     const sec = [];
     const add = (prio, text, short) => { if (text) sec.push({ prio, text, short, cur: text }); };
     add(0, `${shot.dur}-second shot. ${camera(scene, shot)}${moving ? ', slow motivated camera movement' : ', locked-off static camera'}.`);
     add(1, [shot.motion, description(shot)].filter(Boolean).join(' '));
-    add(2, spoken && 'The character speaks in Russian, lips in sync: ' + spoken);
-    if (hasFrame) add(3, 'Animate the input image: keep its faces, costumes, place and light exactly.');
-    else {
-      const chars = characters(p, scene, shot).filter(c => c.tags);
-      add(4, chars.map(c => c.tags).join('\n'), chars.map(c => firstItems(c.tags, 5)).join('\n'));
-      const loc = location(p, scene);
-      if (loc && loc.set) add(5, 'SET: ' + loc.set, 'SET: ' + firstSentence(loc.set));
+    // Runway: только движение и камера, внешность берётся с кадра; звука нет.
+    if (t === 'runway') {
+      if (spoken) add(2, 'The character talks, natural lip movement.');
+      add(3, 'Keep the faces, costumes, place and light of the input image.');
+      add(6, s.style && 'Style: ' + firstSentence(s.style));
+    } else {
+      // Veo и Sora озвучивают сами: реплики с именами, звук отдельной строкой.
+      if (t === 'veo') {
+        const lines = shot.dialogue.filter(d => !d.vo).map(d => `${d.who} says in Russian: ${said(d)}`).concat(shot.dialogue.filter(d => d.vo).map(d => `Voice-over in Russian (${d.who}): ${said(d)}`));
+        add(2, lines.length && 'Dialogue: ' + lines.join(' '));
+      } else add(2, spoken && 'The character speaks in Russian, lips in sync: ' + spoken);
+      const setLabel = t === 'universal' ? 'SET: ' : 'Setting: ';
+      if (hasFrame) add(3, 'Animate the input image: keep its faces, costumes, place and light exactly.');
+      else {
+        const chars = characters(p, scene, shot).filter(c => c.tags);
+        add(4, chars.map(c => c.tags).join('\n'), chars.map(c => firstItems(c.tags, 5)).join('\n'));
+        const loc = location(p, scene);
+        if (loc && loc.set) add(5, setLabel + loc.set, setLabel + firstSentence(loc.set));
+      }
+      add(6, s.style && 'STYLE: ' + s.style, 'Muted dark cinematic look, low saturation, subtle film grain.');
+      if (t !== 'kling') add(7, s.negative && 'Avoid: ' + s.negative, s.negative && 'Avoid: ' + firstItems(s.negative, 10));
+      add(8, shot.sound && (t === 'veo' ? 'Audio: ' + shot.sound + ', natural ambience.' : 'Diegetic sound (in Russian notes): ' + shot.sound + '.'));
+      add(9, !hasFrame && s.look && 'LOOK: ' + s.look, s.look && 'LOOK: ' + firstSentence(s.look));
+      // У Kling запрещённое пишется в отдельное поле «Negative prompt» — ставим его в конец.
+      if (t === 'kling') add(7, s.negative && 'Negative prompt: ' + s.negative, s.negative && 'Negative prompt: ' + firstItems(s.negative, 10));
     }
-    add(6, s.style && 'STYLE: ' + s.style, 'Muted dark cinematic look, low saturation, subtle film grain.');
-    add(7, s.negative && 'Avoid: ' + s.negative, s.negative && 'Avoid: ' + firstItems(s.negative, 10));
-    add(8, shot.sound && 'Diegetic sound (in Russian notes): ' + shot.sound + '.');
-    add(9, !hasFrame && s.look && 'LOOK: ' + s.look, s.look && 'LOOK: ' + firstSentence(s.look));
     const join = () => sec.filter(x => !x.dropped).map(x => x.cur).join('\n\n');
     if (!limit || join().length <= limit) return join();
     const least = sec.slice().sort((a, b) => b.prio - a.prio);
     for (const x of least) if (x.short && x.cur !== x.short) { x.cur = x.short; if (join().length <= limit) return join(); }
     for (const x of least) if (x.prio >= 2) { x.dropped = true; if (join().length <= limit) return join(); }
-    const t = join().slice(0, limit - 1);
-    return t.slice(0, Math.max(t.lastIndexOf(' '), limit - 40)) + '…';
+    const cut = join().slice(0, limit - 1);
+    return cut.slice(0, Math.max(cut.lastIndexOf(' '), limit - 40)) + '…';
   }
 
   // Имя файла, по которому пакетная загрузка сама находит шот: S05_03.png, S05_03.mp4, S05_03.mp3.
   const code = (scene, shot) => 'S' + String(scene.num).padStart(2, '0') + '_' + String(scene.shots.indexOf(shot) + 1).padStart(2, '0');
 
-  function markdown(p, scenes) {
-    const out = ['# ' + p.name + ' — промпты', ''];
+  function markdown(p, scenes, tg) {
+    tg = tg || {};
+    const ti = TARGETS.image[target('image', tg.image)], tv = TARGETS.video[target('video', tg.video)];
+    const out = ['# ' + p.name + ' — промпты', '', `> Промпты картинок составлены для: ${ti.fits} (подходят также: ${ti.also}).`,
+      `> Промпты видео составлены для: ${tv.fits} (подходят также: ${tv.also}).`, ''];
     for (const sc of scenes) {
       out.push(`## Сцена ${sc.num}. ${sc.heading}`, '');
       for (const sh of sc.shots) {
         out.push(`### ${code(sc, sh)} · ${sh.kind} · ${sh.dur} с`, '', sh.text || sh.title || '', '');
         sh.dialogue.forEach(d => out.push(`> ${d.who}${d.vo ? ' (V.O.)' : ''}: ${d.line}`));
         if (sh.dialogue.length) out.push('');
-        const im = image(p, sc, sh), vi = video(p, sc, sh);
+        const im = image(p, sc, sh, tg.image), vi = video(p, sc, sh, tg.video);
         if (im) out.push('**Картинка**', '', '```', im, '```', '');
         if (vi) out.push('**Видео**', '', '```', vi, '```', '');
       }
@@ -175,5 +230,5 @@ const Prompts = (() => {
     return '﻿' + rows.join('\n');
   }
 
-  return { CAMERA, KINDS, noPicture, camera, characters, autoCharacters, location, image, video, videoFit, code, markdown, csv, isEnglish, description };
+  return { TARGETS, CAMERA, KINDS, noPicture, camera, characters, autoCharacters, location, image, video, videoFit, code, markdown, csv, isEnglish, description };
 })();

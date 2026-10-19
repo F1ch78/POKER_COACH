@@ -383,7 +383,7 @@ function stats() {
 function renderHeader() {
   const sel = h('select', { onchange: e => selectProject(e.target.value) },
     S.list.map(p => h('option', { value: p.id, selected: p.id === S.p.id }, p.name)));
-  const tabs = [['library', '1 · Материалы'], ['board', '2 · Раскадровка'], ['conveyor', '3 · Конвейер'], ['voice', '4 · Озвучка'], ['sound', '5 · Звук'], ['edit', '6 · Монтаж']];
+  const tabs = [['dev', '0 · Разработка'], ['library', '1 · Материалы'], ['board', '2 · Раскадровка'], ['conveyor', '3 · Конвейер'], ['voice', '4 · Озвучка'], ['sound', '5 · Звук'], ['edit', '6 · Монтаж']];
   const st = stats();
   return h('header', {},
     h('div', { class: 'brand' }, h('span', { class: 'sun' }), 'Студия'),
@@ -564,8 +564,8 @@ function renderBoard() {
       sc.narration.length ? field('Закадровый текст сцены (субтитры поверх всех шотов)', area(sc.narration.join('\n'), v => { sc.narration = v.split('\n').filter(Boolean); }, 3)) : null,
       h('div', { class: 'row wrap' },
         btn(S.busy ? S.busy + '…' : 'ИИ: английские описания шотов', () => aiScene(sc), 'primary', 'Claude переводит действие каждого шота в визуальное описание для генераторов'),
-        btn('⧉ Все промпты картинок', () => copy(sc.shots.map(sh => [sh, Prompts.image(p, sc, sh)]).filter(([, t]) => t).map(([sh, t]) => promptTagOn() ? promptTag(sc, sh) + t : `### ${Prompts.code(sc, sh)}\n${t}`).join('\n\n'), 'Промпты картинок')),
-        btn('⧉ Все промпты видео', () => copy(sc.shots.map(sh => [sh, Prompts.video(p, sc, sh)]).filter(([, t]) => t).map(([sh, t]) => promptTagOn() ? promptTag(sc, sh) + t : `### ${Prompts.code(sc, sh)}\n${t}`).join('\n\n'), 'Промпты видео')),
+        btn('⧉ Все промпты картинок', () => copy(sc.shots.map(sh => [sh, Prompts.image(p, sc, sh, targetOf('image'))]).filter(([, t]) => t).map(([sh, t]) => promptTagOn() ? promptTag(sc, sh) + t : `### ${Prompts.code(sc, sh)}\n${t}`).join('\n\n'), 'Промпты картинок')),
+        btn('⧉ Все промпты видео', () => copy(sc.shots.map(sh => [sh, Prompts.video(p, sc, sh, targetOf('video'))]).filter(([, t]) => t).map(([sh, t]) => promptTagOn() ? promptTag(sc, sh) + t : `### ${Prompts.code(sc, sh)}\n${t}`).join('\n\n'), 'Промпты видео')),
         btn(`🎨 Картинки сцены (${emptyShots([sc]).length})`, () => genBatch(emptyShots([sc])), '', 'Сгенерировать картинки для шотов сцены, где их ещё нет'),
         btn(`🎬 Видео сцены (${noVideoShots([sc]).length})`, () => genBatch(noVideoShots([sc]), 'video'), '', 'Оживить кадры сцены, где ещё нет видео (через сервис видео из ⚙)'),
         btn('Ассеты пачкой', async () => bulkAssets(await pickFile('image/*,video/*,audio/*', true)), '', 'Файлы с именами S05_03.png, S05_03.mp4 разложатся по шотам'),
@@ -595,6 +595,7 @@ function filterBar(sc) {
     Object.entries(FILTERS).map(([k, f]) => h('button', { class: 'chip' + (S.filter === k ? ' on' : ''), onclick: () => { S.filter = k; render(); } },
       `${f.label} · ${sc.shots.filter(f.test).length}`)),
     h('span', { class: 'grow' }),
+    targetPicker('image'), targetPicker('video'),
     promptTagToggle(),
     h('span', { class: 'muted small' }, 'Щёлкните по шоту и нажмите Ctrl+V, чтобы вставить картинку или видео из буфера'));
 }
@@ -616,12 +617,14 @@ function shotCard(sc, sh, i) {
   const showPrompts = () => {
     promptsBox.classList.toggle('hidden');
     fill(promptsBox, 
-      field('Промпт картинки' + (sh.override.image ? ' (изменён вручную)' : ''), area(Prompts.image(p, sc, sh), v => { sh.override.image = v === buildImage() ? '' : v; }, 8)),
-      field('Промпт видео' + (sh.override.video ? ' (изменён вручную)' : ''), area(Prompts.video(p, sc, sh), v => { sh.override.video = v === buildVideo() ? '' : v; }, 8)),
+      field('Промпт картинки' + (sh.override.image ? ' (изменён вручную)' : ''), area(Prompts.image(p, sc, sh, targetOf('image')), v => { sh.override.image = v === buildImage() ? '' : v; }, 8)),
+      sh.override.image ? null : targetNote('image'),
+      field('Промпт видео' + (sh.override.video ? ' (изменён вручную)' : ''), area(Prompts.video(p, sc, sh, targetOf('video')), v => { sh.override.video = v === buildVideo() ? '' : v; }, 8)),
+      sh.override.video ? null : targetNote('video'),
       (sh.override.image || sh.override.video) ? btn('Сбросить ручные правки', () => { sh.override = {}; touch(); render(); }, 'ghost small') : null);
   };
-  const buildImage = () => Prompts.image(p, sc, Object.assign({}, sh, { override: {} }));
-  const buildVideo = () => Prompts.video(p, sc, Object.assign({}, sh, { override: {} }));
+  const buildImage = () => Prompts.image(p, sc, Object.assign({}, sh, { override: {} }), targetOf('image'));
+  const buildVideo = () => Prompts.video(p, sc, Object.assign({}, sh, { override: {} }), targetOf('video'));
   const move = d => { const j = i + d; if (j < 0 || j >= sc.shots.length) return; sc.shots.splice(i, 1); sc.shots.splice(j, 0, sh); touch(); render(); };
 
   const preview = h('div', { class: 'thumb', title: media ? 'Открыть крупно' : 'Перетащите картинку, видео или звук', onclick: () => media && openViewer(sh, sc) },
@@ -775,11 +778,24 @@ function videoApiPrompt(sc, sh, hasFrame) {
 const promptTagOn = () => S.conv.tag !== false;
 const promptTag = (sc, sh) => `[${Prompts.code(sc, sh)}]\n`;
 const tagged = (sc, sh, text) => promptTagOn() && text ? promptTag(sc, sh) + text : text;
-const copyImagePrompt = (sc, sh) => tagged(sc, sh, Prompts.image(S.p, sc, sh));
+// Под какую нейросеть собираются промпты для копирования (у проекта своя настройка).
+// Runway принимает не больше 1000 символов, что бы ни стояло в лимите.
+const copyVideoLimit = () => targetOf('video') === 'runway' ? Math.min(videoLimit() || 1000, 1000) : videoLimit();
+const targetOf = kind => ((S.p.targets || {})[kind]) || 'universal';
+const targetInfo = kind => Prompts.TARGETS[kind][targetOf(kind)] || Prompts.TARGETS[kind].universal;
+function targetPicker(kind, compact) {
+  const info = targetInfo(kind);
+  return h('label', { class: 'check target', title: `Составлен для: ${info.fits}\nПодходит также: ${info.also}` },
+    compact ? null : (kind === 'image' ? '🖼 промпт для' : '🎬 промпт для'),
+    h('select', { onchange: e => { S.p.targets = Object.assign({}, S.p.targets, { [kind]: e.target.value }); touch(); render(); } },
+      Object.entries(Prompts.TARGETS[kind]).map(([k, v]) => h('option', { value: k, selected: k === targetOf(kind) }, v.label))));
+}
+const targetNote = kind => { const i = targetInfo(kind); return h('div', { class: 'muted small target-note' }, `Промпт составлен для: ${i.fits}. Подходит также: ${i.also}.`); };
+const copyImagePrompt = (sc, sh) => tagged(sc, sh, Prompts.image(S.p, sc, sh, targetOf('image')));
 // Видео: код шота входит в лимит символов сайта, поэтому сам промпт ужимается на его длину.
 function copyVideoPrompt(sc, sh, hasFrame) {
-  const lim = videoLimit(), tag = promptTagOn() ? promptTag(sc, sh).length : 0;
-  return tagged(sc, sh, Prompts.videoFit(S.p, sc, sh, { limit: lim ? Math.max(1, lim - tag) : 0, hasFrame }));
+  const lim = copyVideoLimit(), tag = promptTagOn() ? promptTag(sc, sh).length : 0;
+  return tagged(sc, sh, Prompts.videoFit(S.p, sc, sh, { limit: lim ? Math.max(1, lim - tag) : 0, hasFrame, target: targetOf('video') }));
 }
 const promptTagToggle = () => h('label', { class: 'check', title: 'Каждый скопированный промпт начинается с кода шота, например [S05_03]. В автоматическую генерацию код не попадает.' },
   h('input', { type: 'checkbox', checked: promptTagOn(), onchange: e => { S.conv.tag = e.target.checked; saveUi(); render(); } }), 'код шота в начале промпта');
@@ -1002,7 +1018,7 @@ async function pollDownloads() {
 setInterval(pollDownloads, 2000);
 
 function promptCounter(text) {
-  const lim = S.conv.mode === 'video' ? videoLimit() : 0;
+  const lim = S.conv.mode === 'video' ? copyVideoLimit() : 0;
   const over = lim && text.length > lim;
   return h('div', { class: 'small ' + (over ? 'warn' : 'muted') }, `${text.length} символов` + (lim ? ` из ${lim}` : ''));
 }
@@ -1039,6 +1055,7 @@ function renderConveyor() {
     h('select', { onchange: e => { S.conv.scene = e.target.value; S.conv.shotId = null; render(); } },
       h('option', { value: 'all' }, 'Все сцены'), p.scenes.map(s => h('option', { value: s.id, selected: S.conv.scene === s.id }, `Сцена ${s.num}. ${s.heading.split(/\s+[-–—]\s+/)[0]}`))),
     h('span', { class: 'pill' }, left ? `Осталось ${left} из ${q.length}` : `Все ${q.length} готовы ✓`),
+    targetPicker(S.conv.mode === 'video' ? 'video' : 'image'),
     S.conv.mode === 'video' ? h('label', { class: 'check', title: 'Сколько символов принимает сайт или сервис видео (motion16 — 2000). 0 — без ограничения.' },
       'лимит промпта', h('input', { type: 'number', min: 0, step: 100, value: String(videoLimit()), class: 'num', onchange: e => setVideoLimit(e.target.value) })) : null,
     h('span', { class: 'grow' }),
@@ -1081,6 +1098,7 @@ function renderConveyor() {
           btn(S.busy ? S.busy + '…' : 'ИИ: описать сцену по-английски', () => aiScene(sc), 'linkish')) : null,
         h('textarea', { class: 'conv-prompt', rows: 12, readOnly: true, value: convPrompt(cur), onfocus: e => e.target.select() }),
         promptCounter(convPrompt(cur)),
+        (S.conv.mode === 'video' ? sh.override.video : sh.override.image) ? h('div', { class: 'muted small' }, 'Промпт изменён вручную — выбор нейросети к нему не применяется.') : targetNote(S.conv.mode === 'video' ? 'video' : 'image'),
         h('div', { class: 'row wrap' },
           S.conv.mode === 'image' ? btn(genBusy.has(sh.id) ? '🎨 Рисую…' : result ? '🎨 Ещё вариант' : '🎨 Сгенерировать', () => genOne(sc, sh), 'primary big', 'Клавиша G') : null,
           S.conv.mode === 'image' ? btn(`🎨 Все пустые (${emptyShots(convScenes()).length})`,
@@ -1400,7 +1418,7 @@ function renderEdit() {
         status,
         h('h3', {}, 'Экспорт'),
         h('div', { class: 'row wrap' },
-          btn('Промпты .md', () => download(safeName(p.name) + '_prompts.md', Prompts.markdown(p, scenes), 'text/markdown;charset=utf-8')),
+          btn('Промпты .md', () => download(safeName(p.name) + '_prompts.md', Prompts.markdown(p, scenes, { image: targetOf('image'), video: targetOf('video') }), 'text/markdown;charset=utf-8')),
           btn('Шот-лист .csv', () => download(safeName(p.name) + '_shotlist.csv', Prompts.csv(p, scenes), 'text/csv;charset=utf-8')),
           btn('Субтитры .srt', () => download(safeName(p.name) + '.srt', srt())),
           btn('📝 Список правок .md', () => download(safeName(p.name) + '_pravki.md', reviewReport(), 'text/markdown;charset=utf-8'), '', 'Всё, что надо доработать или переделать, с заметками'),
@@ -1675,7 +1693,7 @@ function dropzone(el, onFiles) {
 function render() {
   const y = window.scrollY;
   if (S.tab !== 'edit' && engine.playing) engine.stop();
-  const body = S.tab === 'library' ? renderLibrary() : S.tab === 'board' ? renderBoard() : S.tab === 'conveyor' ? renderConveyor() : S.tab === 'voice' ? renderVoice() : S.tab === 'sound' ? renderSound() : renderEdit();
+  const body = S.tab === 'dev' ? renderDev() : S.tab === 'library' ? renderLibrary() : S.tab === 'board' ? renderBoard() : S.tab === 'conveyor' ? renderConveyor() : S.tab === 'voice' ? renderVoice() : S.tab === 'sound' ? renderSound() : renderEdit();
   saveUi();
   $('#app').replaceChildren(...[renderHeader(), S.busy ? h('div', { class: 'busy' }, S.busy + '…') : null, h('div', { id: 'genbar', class: 'hidden' }), body].filter(Boolean));
   renderGenBar();

@@ -84,6 +84,20 @@
   .meter i, .bar { display: block; height: 5px; background: var(--panel2); border-radius: 3px; overflow: hidden; }
   .meter i b, .bar b { display: block; height: 100%; background: var(--gold); }
   .vo-scene, .snd-scene { margin-top: 14px; }
+  .dev .card { margin-top: 14px; }
+  .dev-step.done { border-left: 4px solid var(--st-ok); }
+  .dev-msg { border-top: 1px solid var(--line); padding: 8px 0; }
+  .dev-answer { white-space: pre-wrap; }
+  .experts .check { margin-right: 6px; }
+  .crit { margin-top: 10px; border: 1px solid var(--line); border-radius: 10px; padding: 8px 12px; }
+  .crit summary { cursor: pointer; display: flex; gap: 8px; align-items: center; }
+  .crit-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 10px; margin-top: 10px; }
+  .crit-card { background: var(--panel2); border: 1px solid var(--line); border-left: 4px solid var(--st-empty); border-radius: 10px; padding: 10px 12px; }
+  .crit-card ul { margin: 4px 0 8px; padding-left: 18px; }
+  .crit-card.score-ok { border-left-color: var(--st-ok); } .crit-card.score-fix { border-left-color: var(--st-fix); } .crit-card.score-redo { border-left-color: var(--st-redo); }
+  .crit-score { font-weight: 700; }
+  .target select { max-width: 190px; }
+  .target-note { margin-top: 2px; }
   .snd-lib { display: grid; gap: 6px; margin-top: 10px; }
   .snd-item { display: grid; grid-template-columns: 1fr auto 220px auto; gap: 8px; align-items: center; }
   .snd-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -236,6 +250,7 @@
 <script src="voice.js"></script>
 <script src="sound.js"></script>
 <script src="review.js"></script>
+<script src="dev.js"></script>
 <script src="studio.js"></script>
 <script>if ('serviceWorker' in navigator && location.protocol === 'https:') navigator.serviceWorker.register('sw.js').catch(() => {});</script>
 </body>
