@@ -1,59 +1,160 @@
 'use strict';
 // Обращения к Claude прямо из браузера (как в покерном тренере: ключ хранится только на устройстве).
+// Работает и напрямую с Anthropic, и через шлюзы-посредники: формат Anthropic (/v1/messages)
+// или OpenAI-совместимый (/v1/chat/completions) определяется сам при первом запросе.
 
 const AI = (() => {
-  const DEFAULTS = { apiKey: '', model: 'claude-opus-5-5', baseUrl: '', effort: 'medium' };
+  const DEFAULTS = { apiKey: '', model: 'claude-opus-5-5', baseUrl: '', apiFormat: 'auto', effort: 'medium' };
+  // Шлюзы, адрес которых можно подставить по префиксу ключа.
+  const KNOWN = [{ prefix: 'sk-cvc-', baseUrl: 'https://ru.cheapvibecode.ru/v1', name: 'CheapVibeCode' }];
   let settings = Object.assign({}, DEFAULTS);
   try { Object.assign(settings, JSON.parse(localStorage.getItem('cs-ai') || '{}')); } catch (e) {}
 
   const save = s => { settings = Object.assign({}, DEFAULTS, s); try { localStorage.setItem('cs-ai', JSON.stringify(settings)); } catch (e) {} };
-  const root = () => (settings.baseUrl || 'https://api.anthropic.com').trim().replace(/\/+$/, '').replace(/\/v1$/, '');
+  const known = key => KNOWN.find(k => (key || '').trim().startsWith(k.prefix));
+  const baseFor = () => settings.baseUrl || (known(settings.apiKey) || {}).baseUrl || 'https://api.anthropic.com';
+  // Адрес можно вписывать и с /v1 на конце, и без.
+  const root = () => baseFor().trim().replace(/\/+$/, '').replace(/\/v1$/, '');
+  const direct = () => { try { return /(^|\.)api\.anthropic\.com$/i.test(new URL(root()).hostname); } catch (e) { return false; } };
 
-  async function call({ system, user, schema, maxTokens = 16000 }) {
-    if (!settings.apiKey) throw new Error('Укажите API-ключ Claude в настройках (⚙).');
-    const body = {
-      model: settings.model, max_tokens: maxTokens, system,
-      messages: [{ role: 'user', content: user }],
-      output_config: { effort: settings.effort || 'medium' },
-      fallbacks: 'default',
-    };
-    if (schema) body.output_config.format = { type: 'json_schema', schema };
-    const headers = {
-      'content-type': 'application/json',
-      'x-api-key': settings.apiKey,
-      'anthropic-version': '2023-06-01',
-      'anthropic-beta': 'server-side-fallback-2026-07-01',
-      'anthropic-dangerous-direct-browser-access': 'true',
-    };
+  function headers(fmt) {
+    const key = settings.apiKey.trim();
+    if (fmt === 'openai') return { 'content-type': 'application/json', 'authorization': 'Bearer ' + key };
+    const h = { 'content-type': 'application/json', 'x-api-key': key, 'anthropic-version': '2023-06-01' };
+    if (direct()) {
+      h['anthropic-dangerous-direct-browser-access'] = 'true';
+      h['anthropic-beta'] = 'server-side-fallback-2026-07-01';
+    } else h['authorization'] = 'Bearer ' + key;   // шлюзы принимают ключ то в одном заголовке, то в другом
+    return h;
+  }
+
+  function explain(status, msg) {
+    const hint = {
+      400: 'Сервер не принял запрос — проверьте название модели.',
+      401: 'Неверный API-ключ.',
+      402: 'Закончился баланс у сервиса.',
+      403: 'Доступ запрещён — ключ не подходит к этому адресу или регион закрыт.',
+      404: 'Не найдено — проверьте адрес API и название модели.',
+      429: 'Слишком много запросов или закончился баланс.',
+      529: 'Сервер перегружен, повторите через минуту.',
+    }[status];
+    return (hint ? hint + ' ' : '') + '(' + status + (msg ? ': ' + msg : '') + ')';
+  }
+
+  async function send(fmt, body) {
+    const url = root() + (fmt === 'openai' ? '/v1/chat/completions' : '/v1/messages');
     let resp;
     try {
-      resp = await fetch(root() + '/v1/messages', { method: 'POST', headers, body: JSON.stringify(body) });
-      // Прокси или старый шлюз может не знать параметр fallbacks — повторяем без него.
-      if (resp.status === 400) {
-        const j = await resp.clone().json().catch(() => ({}));
-        if (/fallback/i.test(JSON.stringify(j))) {
-          delete body.fallbacks; delete headers['anthropic-beta'];
-          resp = await fetch(root() + '/v1/messages', { method: 'POST', headers, body: JSON.stringify(body) });
-        }
-      }
+      resp = await fetch(url, { method: 'POST', headers: headers(fmt), body: JSON.stringify(body) });
     } catch (e) {
-      throw new Error('Нет связи с сервером Claude (' + root() + '). Проверьте интернет/VPN или адрес прокси.');
+      const err = new Error(direct()
+        ? 'Нет связи с сервером Claude. Проверьте интернет; из России обычно нужен VPN или шлюз-посредник.'
+        : 'Нет связи с ' + root() + '. Проверьте адрес и интернет. Если адрес верный, сервер, возможно, не принимает запросы из браузера.');
+      err.network = true;
+      throw err;
     }
     if (!resp.ok) {
-      let msg = resp.status + ' ' + resp.statusText;
-      try { const j = await resp.json(); msg = (j.error && j.error.message) || msg; } catch (e) {}
-      if (resp.status === 401) msg = 'Неверный API-ключ (401).';
-      throw new Error(msg);
+      let msg = resp.statusText;
+      try { const j = await resp.json(); msg = (j.error && (j.error.message || j.error)) || j.message || j.detail || msg; } catch (e) {}
+      const err = new Error(explain(resp.status, typeof msg === 'string' ? msg : JSON.stringify(msg)));
+      err.status = resp.status; err.raw = String(msg);
+      throw err;
     }
-    const data = await resp.json();
+    return resp.json();
+  }
+
+  function anthropicBody({ system, user, schema, maxTokens }) {
+    const body = { model: settings.model, max_tokens: maxTokens, system, messages: [{ role: 'user', content: user }] };
+    if (direct()) {
+      body.output_config = { effort: settings.effort || 'medium' };
+      if (schema) body.output_config.format = { type: 'json_schema', schema };
+      body.fallbacks = 'default';
+    }
+    return body;
+  }
+
+  function readAnthropic(data) {
     if (data.stop_reason === 'refusal') throw new Error('Модель отказалась отвечать на этот запрос' + (data.stop_details && data.stop_details.explanation ? ': ' + data.stop_details.explanation : '.'));
-    const text = (data.content || []).filter(b => b.type === 'text').map(b => b.text).join('');
+    return (data.content || []).filter(b => b.type === 'text').map(b => b.text).join('');
+  }
+
+  function readOpenAI(data) {
+    const ch = data.choices && data.choices[0];
+    if (!ch) throw new Error('Пустой ответ сервера.');
+    const c = ch.message && ch.message.content;
+    return Array.isArray(c) ? c.map(x => x.text || '').join('') : (c || '');
+  }
+
+  // Один запрос с автоопределением формата: сначала Anthropic, при отказе — OpenAI-совместимый.
+  async function call({ system, user, schema, maxTokens = 16000 }) {
+    if (!settings.apiKey) throw new Error('Укажите API-ключ в настройках (⚙).');
+    // Шлюзы не всегда поддерживают структурированный ответ, поэтому формат JSON всегда дублируем в тексте.
+    if (schema) user += '\n\nReturn only a JSON object matching this JSON Schema, with no other text:\n' + JSON.stringify(schema);
+    const fmt = settings.apiFormat === 'auto' ? (settings.detected || 'anthropic') : settings.apiFormat;
+    let text;
+    try {
+      text = await callAs(fmt, { system, user, schema, maxTokens });
+    } catch (e) {
+      const other = fmt === 'anthropic' ? 'openai' : 'anthropic';
+      const switchable = settings.apiFormat === 'auto' && !direct() && (e.network || [400, 404, 405, 415, 422].includes(e.status));
+      if (!switchable) throw e;
+      try { text = await callAs(other, { system, user, schema, maxTokens }); }
+      catch (e2) { throw e2.network || e2.status === 404 ? e : e2; }
+      save(Object.assign({}, settings, { detected: other }));
+      return parse(text, schema);
+    }
+    if (settings.apiFormat === 'auto' && settings.detected !== fmt) save(Object.assign({}, settings, { detected: fmt }));
+    return parse(text, schema);
+  }
+
+  async function callAs(fmt, req) {
+    if (fmt === 'openai') {
+      const data = await send('openai', { model: settings.model, max_tokens: req.maxTokens,
+        messages: [{ role: 'system', content: req.system }, { role: 'user', content: req.user }] });
+      return readOpenAI(data);
+    }
+    const body = anthropicBody(req);
+    try {
+      return readAnthropic(await send('anthropic', body));
+    } catch (e) {
+      // Прокси или старый шлюз может не знать новые параметры — повторяем без них.
+      if (e.status === 400 && (body.fallbacks || body.output_config) && /fallback|output_config|effort|format|beta/i.test(e.raw || '')) {
+        delete body.fallbacks; delete body.output_config;
+        return readAnthropic(await send('anthropic', body));
+      }
+      throw e;
+    }
+  }
+
+  function parse(text, schema) {
     if (!schema) return text;
     try { return JSON.parse(text); } catch (e) {
       const m = text.match(/\{[\s\S]*\}/);
       if (m) return JSON.parse(m[0]);
       throw new Error('Не удалось разобрать ответ модели.');
     }
+  }
+
+  // Проверка связи: короткий запрос и список моделей сервиса (если он его отдаёт).
+  async function ping() {
+    const t0 = performance.now();
+    const answer = await call({ system: 'Answer with one word.', user: 'Скажи «ок».', maxTokens: 400 });
+    const fmt = settings.apiFormat === 'auto' ? settings.detected : settings.apiFormat;
+    return { answer: answer.replace(/```\w*/g, '').trim().slice(0, 40), fmt, ms: Math.round(performance.now() - t0), base: root() };
+  }
+
+  async function models() {
+    for (const fmt of ['anthropic', 'openai']) {
+      try {
+        const h = headers(fmt); delete h['content-type'];
+        const r = await fetch(root() + '/v1/models', { headers: h });
+        if (!r.ok) continue;
+        const j = await r.json();
+        const list = (j.data || j.models || []).map(m => m.id || m.name).filter(Boolean);
+        if (list.length) return list;
+      } catch (e) { /* пробуем дальше */ }
+    }
+    return [];
   }
 
   const VISUAL_RULES = `Rules for every description:
@@ -91,5 +192,5 @@ const AI = (() => {
     return (await call({ system, user: `Character: ${name}. Write only the tag-set.`, maxTokens: 4000 })).trim();
   }
 
-  return { get settings() { return settings; }, save, call, describeScene, locationSet, characterTags };
+  return { get settings() { return settings; }, save, known, call, ping, models, describeScene, locationSet, characterTags };
 })();

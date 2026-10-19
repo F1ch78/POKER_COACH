@@ -910,18 +910,54 @@ async function recordVideo(status, playBtn) {
 // ---------------------------------------------------------------- настройки
 function openSettings() {
   const s = AI.settings;
-  const key = h('input', { type: 'password', value: s.apiKey, placeholder: 'sk-ant-…' });
-  const model = h('select', {}, [['claude-opus-5-5', 'Claude Opus 5.5 (качество)'], ['claude-sonnet-5-5', 'Claude Sonnet 5.5 (быстрее, дешевле)'], ['claude-haiku-5-5', 'Claude Haiku 5.5 (самый дешёвый)']]
-    .map(([v, l]) => h('option', { value: v, selected: s.model === v }, l)));
+  const key = h('input', { type: 'password', value: s.apiKey, placeholder: 'sk-ant-… или ключ сервиса-посредника, например sk-cvc-…', autocomplete: 'off' });
+  const base = h('input', { value: s.baseUrl, placeholder: 'пусто — напрямую в Anthropic', autocomplete: 'off', autocapitalize: 'off' });
+  const fmt = h('select', {}, [['auto', 'Авто (определится при проверке связи)'], ['anthropic', 'Anthropic (/v1/messages)'], ['openai', 'OpenAI-совместимый (/v1/chat/completions)']]
+    .map(([v, l]) => h('option', { value: v, selected: s.apiFormat === v }, l)));
+  const models = h('datalist', { id: 'cs-models' }, ['claude-opus-5-5', 'claude-sonnet-5-5', 'claude-haiku-5-5'].map(m => h('option', { value: m })));
+  const model = h('input', { value: s.model, list: 'cs-models', placeholder: 'claude-opus-5-5', autocomplete: 'off' });
   const effort = h('select', {}, [['low', 'низкое'], ['medium', 'среднее'], ['high', 'высокое']].map(([v, l]) => h('option', { value: v, selected: s.effort === v }, l)));
-  const base = h('input', { value: s.baseUrl, placeholder: 'https://api.anthropic.com' });
+  const status = h('div', { class: 'small' });
+  const keyHint = h('div', { class: 'muted small' });
+  // Ключ шлюза с известным префиксом сам подставляет его адрес.
+  const onKey = () => {
+    const k = AI.known(key.value);
+    if (k && !base.value.trim()) base.value = k.baseUrl;
+    keyHint.textContent = k ? `Ключ ${k.name}: запросы пойдут через ${k.baseUrl}` : '';
+  };
+  key.addEventListener('input', onKey); onKey();
+  const values = () => ({ apiKey: key.value.trim(), baseUrl: base.value.trim(), apiFormat: fmt.value, model: model.value.trim() || 'claude-opus-5-5', effort: effort.value,
+    detected: base.value.trim() === AI.settings.baseUrl && fmt.value === AI.settings.apiFormat ? AI.settings.detected : '' });
+  const test = async () => {
+    const before = Object.assign({}, AI.settings);
+    AI.save(values());
+    fill(status, h('span', { class: 'muted' }, 'Проверяю…'));
+    try {
+      const r = await AI.ping();
+      const list = await AI.models();
+      if (list.length) fill(models, ...list.map(m => h('option', { value: m })));
+      const claude = list.filter(m => /claude/i.test(m));
+      fill(status, h('div', { class: 'ok' }, `✓ Связь есть: ${r.base}, формат ${r.fmt === 'openai' ? 'OpenAI' : 'Anthropic'}, ответ «${r.answer}» за ${(r.ms / 1000).toFixed(1)} с.`),
+        list.length ? h('div', { class: 'muted' }, `Моделей у сервиса: ${list.length}` + (claude.length ? ', среди них ' + claude.slice(0, 6).join(', ') + (claude.length > 6 ? '…' : '') : '') + '. Список — в поле «Модель».') : null);
+      fmt.value = AI.settings.apiFormat;
+    } catch (e) {
+      AI.save(before);
+      fill(status, h('div', { class: 'warn' }, e.message,
+        list404(e) ? h('div', {}, 'Возможно, у сервиса другое название модели. Впишите его в поле «Модель» (как в личном кабинете сервиса).') : null));
+    }
+  };
+  const list404 = e => e.status === 400 || e.status === 404;
   const dlg = h('dialog', {},
-    h('h3', {}, 'Claude'),
-    h('p', { class: 'muted small' }, 'Ключ хранится только в этом браузере. Нужен для кнопок «ИИ»: перевод шотов в английские описания, SET локаций, тег-сеты героев. Без ключа работает всё остальное.'),
-    field('API-ключ', key), field('Модель', model), field('Усилие (глубина размышлений)', effort), field('Адрес API или прокси (необязательно)', base),
-    h('div', { class: 'row' }, h('span', { class: 'grow' }),
+    h('h3', {}, 'Подключение к Claude'),
+    h('p', { class: 'muted small' }, 'Ключ хранится только в этом браузере. Нужен для кнопок «ИИ»: английские описания шотов, SET локаций, тег-сеты героев. Без ключа работает всё остальное.'),
+    field('API-ключ', key), keyHint,
+    field('Адрес API (для сервиса-посредника)', base),
+    h('div', { class: 'row wrap' }, field('Формат API', fmt), field('Модель', model), models),
+    field('Усилие (только при прямом подключении к Anthropic)', effort),
+    status,
+    h('div', { class: 'row' }, btn('Проверить связь', test), h('span', { class: 'grow' }),
       btn('Отмена', () => dlg.close(), 'ghost'),
-      btn('Сохранить', () => { AI.save({ apiKey: key.value.trim(), model: model.value, effort: effort.value, baseUrl: base.value.trim() }); dlg.close(); toast('Сохранено'); }, 'primary')));
+      btn('Сохранить', () => { AI.save(values()); dlg.close(); toast('Сохранено'); }, 'primary')));
   dlg.addEventListener('close', () => dlg.remove());
   document.body.append(dlg); dlg.showModal();
 }
