@@ -85,6 +85,13 @@
   .meter i b, .bar b { display: block; height: 100%; background: var(--gold); }
   .vo-scene, .snd-scene { margin-top: 14px; }
   .dev .card { margin-top: 14px; }
+  .dev-more > summary { cursor: pointer; color: var(--muted); }
+  dialog.setup { width: min(760px, 94vw); max-height: 90vh; overflow: auto; }
+  .setup-item { border-top: 1px solid var(--line); padding: 8px 0; }
+  .setup-item .check { gap: 8px; }
+  .setup-extra { margin: 6px 0 0 26px; display: grid; gap: 6px; }
+  .setup-extra:empty { display: none; }
+  .setup-order { margin: 12px 0; padding: 10px; border-radius: 10px; background: var(--panel2); }
   .dev-step.done { border-left: 4px solid var(--st-ok); }
   .dev-refs { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 10px; margin: 8px 0; }
   .dev-ref { background: var(--panel2); border: 1px solid var(--line); border-radius: 10px; padding: 8px; display: grid; gap: 6px; align-content: start; min-width: 0; }
@@ -259,6 +266,7 @@
 <script src="sound.js"></script>
 <script src="review.js"></script>
 <script src="dev.js"></script>
+<script src="setup.js"></script>
 <script src="studio.js"></script>
 <script>if ('serviceWorker' in navigator && location.protocol === 'https:') navigator.serviceWorker.register('sw.js').catch(() => {});</script>
 </body>

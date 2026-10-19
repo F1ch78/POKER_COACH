@@ -307,7 +307,7 @@ const isDone = k => /ПЛАН ЗАВЕРШЁН/.test(devConf().steps[k] || '');
 
 function devRequest(step, note) {
   const d = devConf();
-  const need = { world: [], cast: ['world'], plan: ['world', 'cast'], scenes: ['world', 'cast', 'plan'], shots: ['cast', 'scenes'], voices: ['world', 'cast', 'scenes'] }[step.k];
+  const need = { world: ['plan', 'scenes'], cast: ['world', 'plan', 'scenes'], plan: ['world', 'cast'], scenes: ['world', 'cast', 'plan'], shots: ['cast', 'scenes'], voices: ['world', 'cast', 'scenes'] }[step.k];
   const prev = need.map(k => devDoc(k) && `=== ${DEV_STEPS.find(s => s.k === k).title} ===\n${cut(devDoc(k), k === 'scenes' ? 60000 : 30000)}`).filter(Boolean);
   const range = step.batch ? nextRange(step.k).label : '';
   const current = d.steps[step.k];
@@ -516,7 +516,7 @@ function refCard(r, i) {
 }
 
 function renderDev() {
-  const d = devConf(), pr = d.params, ai = d.mode === 'ai';
+  const d = devConf(), pr = d.params, ai = d.mode === 'ai', have = S.p.have;
   const set = (k, v) => { pr[k] = v; touch(); };
   const modeBtn = (m, label) => h('button', { class: 'tab' + (d.mode === m ? ' on' : ''), onclick: () => { d.mode = m; touch(); render(); } }, label);
 
@@ -533,8 +533,9 @@ function renderDev() {
     h('button', { class: 'dev-ref add', onclick: async () => devAttach(await pickFile('image/*,video/*,audio/*', true)) }, '📎 Прикрепить фото, видео или аудио', h('small', { class: 'muted' }, 'или перетащите файлы сюда')));
   dropzone(drop, devAttach);
 
-  const idea = h('div', { class: 'card' },
-    h('h3', {}, 'Идея'),
+  const ideaLater = have && !have.idea && (have.script || have.world || have.cast || have.plan);
+  const idea = h(ideaLater ? 'details' : 'div', { class: 'card' },
+    ideaLater ? h('summary', {}, h('b', {}, 'Идея, вложения и параметры канала'), h('span', { class: 'muted small' }, ' — для помощника и критики')) : h('h3', {}, 'Идея'),
     area(d.idea, v => { d.idea = v; }, 4, 'О чём ваш фильм или канал? Мир, герой, тайна, образ, который не отпускает.'),
     h('div', { class: 'muted small' }, 'Вложения: референсы настроения, внешности героев, мест, света, музыки. Подпишите, что это — так ИИ поймёт, зачем они.'),
     drop,
@@ -551,7 +552,7 @@ function renderDev() {
       field('NEGATIVE', area(d.negative, v => { d.negative = v.trim() || NP_NEGATIVE; }, 3))));
 
   const timing = devTiming();
-  const steps = DEV_STEPS.map(step => {
+  const stepCard = step => {
     const text = d.steps[step.k] || '', note = h('input', { type: 'text', placeholder: 'Что поправить (например: «короче», «героиня старше», «финал светлее»)', class: 'grow' });
     const imported = step.kind && S.p.docs.some(x => x.file === `razrabotka_${step.k}.md`);
     const done = step.batch && isDone(step.k);
@@ -579,7 +580,13 @@ function renderDev() {
             h('td', {}, `${r.num}. ${r.heading}`), h('td', {}, r.type), h('td', {}, r.plan ? r.plan + ' с' : '—'), h('td', {}, r.text ? r.text + ' с' : '—'), h('td', {}, r.shots))))) : null,
       text && !step.batch ? h('div', { class: 'row' }, note,
         ai ? btn('✎ Поправить', () => { if (!note.value.trim()) return toast('Напишите, что поправить'); devGenerate(step, note.value.trim()); }, '') : null) : null);
-  });
+  };
+  // Шаги по анкете проекта: сначала то, что предстоит сделать; написанное раньше и уже готовое — свёрнуто.
+  const by = st => DEV_STEPS.filter(s => stepState(s.k, have) === st);
+  const named = list => list.map(s => s.title.replace(/^\d+\.\s*/, '')).join(', ');
+  const steps = [by('need').map(stepCard),
+    by('optional').length ? h('details', { class: 'card dev-more' }, h('summary', {}, `Необязательные шаги: ${named(by('optional'))} — нужны, только чтобы написать то, что у вас уже есть`), by('optional').map(stepCard)) : null,
+    by('have').length ? h('details', { class: 'card dev-more' }, h('summary', {}, `Уже есть в проекте: ${named(by('have'))}`), by('have').map(stepCard)) : null];
 
   const qa = h('textarea', { rows: 2, placeholder: 'Спросите помощника о чём угодно по проекту: «как сократить до 10 минут?», «придумай имя героине», «чем заменить сцену в метро?»' });
   const chat = ai ? h('div', { class: 'card' },

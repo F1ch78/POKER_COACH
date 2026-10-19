@@ -74,6 +74,7 @@ function selectProject(id) {
   flush();
   S.p = S.list.find(p => p.id === id); migrate(S.p);
   S.sceneId = null;
+  if (S.p.have && !projectTabs(S.p).includes(S.tab)) S.tab = landingTab(S.p);
   try { localStorage.setItem('cs-last', id); } catch (e) {}
   render();
 }
@@ -384,16 +385,14 @@ function stats() {
 function renderHeader() {
   const sel = h('select', { onchange: e => selectProject(e.target.value) },
     S.list.map(p => h('option', { value: p.id, selected: p.id === S.p.id }, p.name)));
-  const tabs = [['dev', '0 · Разработка'], ['library', '1 · Материалы'], ['board', '2 · Раскадровка'], ['conveyor', '3 · Конвейер'], ['voice', '4 · Озвучка'], ['sound', '5 · Звук'], ['edit', '6 · Монтаж']];
+  const tabs = projectTabs(S.p).map((k, i) => [k, `${i + 1} · ${TAB_NAME[k]}`]);
+  const hidden = S.p.have ? ALL_TABS.filter(k => !projectTabs(S.p).includes(k)) : [];
   const st = stats();
   return h('header', {},
     h('div', { class: 'brand' }, h('span', { class: 'sun' }), 'Студия'),
     sel,
-    btn('+', async () => {
-      const name = prompt('Название проекта', 'Новый фильм'); if (!name) return;
-      await flush();
-      const p = newProject(name); await DB.saveProject(p); S.list.unshift(p); selectProject(p.id);
-    }, 'ghost', 'Новый проект'),
+    btn('+', () => openSetup(true), 'ghost', 'Новый проект'),
+    btn('🧭', () => openSetup(false), 'ghost', 'Что есть в проекте: порядок работ и разделы'),
     btn('✎', () => { const n = prompt('Название проекта', S.p.name); if (n) { S.p.name = n; touch(); render(); } }, 'ghost', 'Переименовать'),
     btn('🗑', async () => {
       if (!confirm(`Удалить проект «${S.p.name}» со всеми файлами?`)) return;
@@ -403,7 +402,8 @@ function renderHeader() {
     }, 'ghost', 'Удалить проект'),
     st.pic ? h('span', { class: 'pill', title: 'Готовность: английские описания · картинки · видео' },
       `EN ${st.en}/${st.pic} · 🖼 ${st.img}/${st.pic} · 🎬 ${st.vid}/${st.pic} · ${fmtDur(st.dur)}`) : null,
-    h('nav', {}, tabs.map(([k, l]) => h('button', { class: S.tab === k ? 'tab on' : 'tab', onclick: () => { S.tab = k; render(); window.scrollTo(0, 0); } }, l))),
+    h('nav', {}, tabs.map(([k, l]) => h('button', { class: S.tab === k ? 'tab on' : 'tab', onclick: () => { S.tab = k; render(); window.scrollTo(0, 0); } }, l)),
+      hidden.length || S.showAllTabs ? btn(S.showAllTabs ? '↩' : '…', () => { S.showAllTabs = !S.showAllTabs; render(); }, 'tab', S.showAllTabs ? 'Показать только нужные разделы' : 'Скрытые разделы: ' + hidden.map(k => TAB_NAME[k]).join(', ')) : null),
     btn('⚙', openSettings, 'ghost', 'Настройки ИИ'),
   );
 }
@@ -1751,5 +1751,7 @@ window.addEventListener('beforeunload', () => { flush(); });
 (async () => {
   AI.bridge().then(ok => { S.bridgeOk = ok; if (S.tab === 'conveyor') render(); });
   try { await loadProjects(); } catch (e) { document.body.textContent = 'Не удалось открыть хранилище браузера: ' + e.message; return; }
+  if (S.p.have && !projectTabs(S.p).includes(S.tab)) S.tab = landingTab(S.p);
   render();
+  if (!S.p.setup && !S.p.docs.length && !S.p.scenes.length) openSetup(false);
 })();

@@ -10,7 +10,12 @@ const Parser = (() => {
     return s.replace(/&#91;/g, '[').replace(/&#93;/g, ']').replace(/\\([\[\]*_#>`-])/g, '$1').replace(/\r/g, '');
   }
 
-  function detectKind(text) {
+  // Заголовок сцены: «### СЦЕНА 5. МЕСТО - ВРЕМЯ», а также без решёток и жирным: «СЦЕНА 5. …», «**СЦЕНА 5. …**».
+  const SCENE_HEAD = /^(?:#{1,4}\s*)?(?:\*\*)?\s*(?:СЦЕНА|SCENE)\s*(\d+)\s*[.:]?\s*(.*?)\s*(?:\*\*)?$/i;
+
+  function detectKind(raw) {
+    const text = clean(raw);
+    if (text.split('\n').filter(l => SCENE_HEAD.test(l.trim())).length >= 1 && /^\s*\[[^\]]+\]/m.test(text)) return 'script';
     if (/^###\s*СЦЕНА\s*\d+/mi.test(text) || /^###\s*SCENE\s*\d+/mi.test(text)) return 'script';
     if (/```[\s\S]*?(SET:|STYLE:|LOOK:)/.test(text)) return 'cast';
     return 'bible';
@@ -39,19 +44,20 @@ const Parser = (() => {
       line = line.trim();
       if (!line) continue;
       let m;
-      if ((m = line.match(/^##\s+(.+)$/)) && !line.startsWith('###')) { act = m[1].trim(); continue; }
-      if ((m = line.match(/^###\s*(?:СЦЕНА|SCENE)\s*(\d+)\.?\s*(.*)$/i))) {
-        scene = { id: uid(), num: +m[1], heading: m[2].trim(), act, type: '', notes: [], shift: '', planSec: 0, textSec: 0,
+      if ((m = line.match(SCENE_HEAD))) {
+        scene = { id: uid(), num: +m[1], heading: m[2].replace(/\*+$/, '').trim(), act, type: '', notes: [], shift: '', planSec: 0, textSec: 0,
           narration: [], locationId: '', shots: [] };
         scenes.push(scene);
         continue;
       }
+      if ((m = line.match(/^##\s+(.+)$/)) && !line.startsWith('###')) { act = m[1].trim(); continue; }
       if (!scene) continue;
-      if ((m = line.match(/^\*\*Тип:\*\*\s*(.+)$/))) { scene.type = m[1].trim(); continue; }
+      if ((m = line.match(/^\*{0,2}Тип:\*{0,2}\s*(.+)$/))) { scene.type = m[1].trim(); continue; }
+      if ((m = line.match(/^\*{0,2}Действие:\*{0,2}\s*(.+)$/))) { scene.notes.push(m[1].trim()); continue; }
       if (/^\*\*Действие:\*\*\s*$/.test(line)) continue;
       if ((m = line.match(/^\*\*(.+)\*\*$/))) { scene.notes.push(m[1]); continue; }
-      if ((m = line.match(/^Сдвиг:\s*(.+)$/))) { scene.shift = m[1].trim(); continue; }
-      if ((m = line.match(/^\*?Хронометраж:(.+?)\*?$/))) {
+      if ((m = line.match(/^\*{0,2}Сдвиг:\*{0,2}\s*(.+)$/))) { scene.shift = m[1].trim(); continue; }
+      if ((m = line.match(/^\*{0,2}Хронометраж:\*{0,2}(.+?)\*?$/))) {
         const p = m[1].match(/по плану\s*(\d+)/), t = m[1].match(/по тексту\s*(\d+)/);
         scene.planSec = p ? +p[1] : 0; scene.textSec = t ? +t[1] : 0;
         continue;
