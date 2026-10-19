@@ -646,7 +646,7 @@ function shotCard(sc, sh, i) {
         area(sh.motion, v => { sh.motion = v; }, 2, 'Движение в шоте по-английски (для видео)')) : null,
       picture ? h('div', { class: 'row wrap' },
         btn('⧉ Промпт картинки', () => copy(Prompts.image(p, sc, sh), 'Промпт картинки ' + code), 'chip' + (Prompts.isEnglish(Prompts.description(sh)) ? '' : ' warnchip'), Prompts.isEnglish(Prompts.description(sh)) ? '' : 'Описание кадра ещё на русском'),
-        btn('⧉ Промпт видео', () => copy(Prompts.video(p, sc, sh), 'Промпт видео ' + code), 'chip'),
+        btn('⧉ Промпт видео', () => copy(videoApiPrompt(sc, sh, !!sh.assets.image), 'Промпт видео ' + code), 'chip', `Под лимит ${videoLimit() || '—'} символов; с кадром шота — без описаний героев и места`),
         btn('Промпты ▾', showPrompts, 'chip ghost'),
         h('span', { class: 'grow' }),
         btn(genBusy.has(sh.id) ? '🎨 …' : sh.assets.image ? '🎨 ещё вариант' : '🎨 Сгенерировать', () => genOne(sc, sh), 'chip gen', 'Сгенерировать картинку по промпту с референсами героев и локации'),
@@ -734,15 +734,11 @@ async function frameData(id) {
   return { blob: jpg, mime: 'image/jpeg', b64 };
 }
 
-// С первым кадром модели не нужны описания героев и места — они уже на картинке; нужны движение, реплика и стиль.
+// Промпт видео — один и тот же для API, «Конвейера» и кнопки копирования: под лимит символов из ⚙ → «Видео».
+// С кадром шота модели не нужны описания героев и места — они уже на картинке.
+const videoLimit = () => +AI.videoSettings().maxPrompt || 0;
 function videoApiPrompt(sc, sh, hasFrame) {
-  if (sh.override && sh.override.video) return sh.override.video;
-  if (!hasFrame) return Prompts.video(S.p, sc, sh);
-  const spoken = sh.dialogue.filter(d => !d.vo).map(d => '«' + d.line.replace(/^\([^)]*\)\s*/, '') + '»').join(' ');
-  return [Prompts.camera(sc, sh) + '.', sh.motion, Prompts.description(sh),
-    spoken && 'The character speaks in Russian, lips in sync: ' + spoken,
-    'Animate the input image: keep its faces, costumes, place and light. Muted dark cinematic look, subtle film grain. No text, no music.']
-    .filter(Boolean).join(' ');
+  return Prompts.videoFit(S.p, sc, sh, { limit: videoLimit(), hasFrame });
 }
 
 async function genVideoShot(sc, sh, onProgress, shouldStop) {
@@ -915,7 +911,7 @@ function convGo(step, onlyTodo) {
   if (S.conv.autoCopy) convCopy();
 }
 
-function convPrompt(c) { return S.conv.mode === 'image' ? Prompts.image(S.p, c.sc, c.sh) : Prompts.video(S.p, c.sc, c.sh); }
+function convPrompt(c) { return S.conv.mode === 'image' ? Prompts.image(S.p, c.sc, c.sh) : videoApiPrompt(c.sc, c.sh, !!c.sh.assets.image); }
 function convCopy() { const { cur } = convCurrent(); if (cur) copy(convPrompt(cur), `Промпт ${Prompts.code(cur.sc, cur.sh)}`); }
 
 async function convAttach(files) {
@@ -960,6 +956,17 @@ async function pollDownloads() {
 }
 setInterval(pollDownloads, 2000);
 
+function promptCounter(text) {
+  const lim = S.conv.mode === 'video' ? videoLimit() : 0;
+  const over = lim && text.length > lim;
+  return h('div', { class: 'small ' + (over ? 'warn' : 'muted') }, `${text.length} символов` + (lim ? ` из ${lim}` : ''));
+}
+
+function setVideoLimit(v) {
+  AI.save(Object.assign({}, AI.settings, { video: Object.assign({}, AI.settings.video, { maxPrompt: Math.max(0, Math.round(+v || 0)) }) }));
+  render();
+}
+
 const convScenes = () => S.conv.scene === 'all' ? S.p.scenes : S.p.scenes.filter(s => s.id === S.conv.scene);
 
 // Картинку в буфер обмена (PNG — его понимают все сайты при вставке Ctrl+V).
@@ -987,6 +994,8 @@ function renderConveyor() {
     h('select', { onchange: e => { S.conv.scene = e.target.value; S.conv.shotId = null; render(); } },
       h('option', { value: 'all' }, 'Все сцены'), p.scenes.map(s => h('option', { value: s.id, selected: S.conv.scene === s.id }, `Сцена ${s.num}. ${s.heading.split(/\s+[-–—]\s+/)[0]}`))),
     h('span', { class: 'pill' }, left ? `Осталось ${left} из ${q.length}` : `Все ${q.length} готовы ✓`),
+    S.conv.mode === 'video' ? h('label', { class: 'check', title: 'Сколько символов принимает сайт или сервис видео (motion16 — 2000). 0 — без ограничения.' },
+      'лимит промпта', h('input', { type: 'number', min: 0, step: 100, value: String(videoLimit()), class: 'num', onchange: e => setVideoLimit(e.target.value) })) : null,
     h('span', { class: 'grow' }),
     h('label', { class: 'check', title: S.bridgeOk ? 'Скачанные с сайта генератора файлы сами попадут в текущий шот' : 'Работает, когда студия открыта через start-studio.bat' },
       h('input', { type: 'checkbox', checked: !!S.conv.watch && S.bridgeOk, disabled: !S.bridgeOk,
@@ -1023,6 +1032,7 @@ function renderConveyor() {
         !Prompts.isEnglish(desc) ? h('div', { class: 'warn small' }, 'Описание кадра на русском. ',
           btn(S.busy ? S.busy + '…' : 'ИИ: описать сцену по-английски', () => aiScene(sc), 'linkish')) : null,
         h('textarea', { class: 'conv-prompt', rows: 12, readOnly: true, value: convPrompt(cur), onfocus: e => e.target.select() }),
+        promptCounter(convPrompt(cur)),
         h('div', { class: 'row wrap' },
           S.conv.mode === 'image' ? btn(genBusy.has(sh.id) ? '🎨 Рисую…' : result ? '🎨 Ещё вариант' : '🎨 Сгенерировать', () => genOne(sc, sh), 'primary big', 'Клавиша G') : null,
           S.conv.mode === 'image' ? btn(`🎨 Все пустые (${emptyShots(convScenes()).length})`,
@@ -1223,8 +1233,9 @@ function openSettings() {
     vidModel.placeholder = list[0] ? 'например ' + list[0] : '';
   };
   vidProvider.addEventListener('change', onVidProvider); onVidProvider();
+  const vidMax = h('input', { type: 'number', min: 0, step: 100, value: String(vs.maxPrompt) });
   const vidValues = () => ({ provider: vidProvider.value, apiKey: vidKey.value.trim(), baseUrl: vidBase.value.trim(), model: vidModel.value.trim(),
-    extra: vidExtra.value.trim(), concurrency: +vidConc.value });
+    extra: vidExtra.value.trim(), concurrency: +vidConc.value, maxPrompt: Math.max(0, Math.round(+vidMax.value || 0)) });
   const testVideo = async () => {
     if (!confirm('Проверка создаст короткое видео (4–5 секунд). У платных сервисов это спишет деньги. Продолжить?')) return;
     const before = Object.assign({}, AI.settings);
@@ -1342,6 +1353,7 @@ function openSettings() {
     h('div', { class: 'row' }, btn('Подобрать автоматически', pickImage, 'primary', 'Перепробовать модели и способы на тестовой картинке и запомнить рабочий'), btn('Проверить картинки', testImage)),
     h('h4', {}, 'Видео — кнопки 🎬'),
     field('Сервис', vidProvider),
+    field('Максимум символов в промпте видео (motion16 — 2000; 0 — без ограничения)', vidMax),
     vidKeyField, vidBaseField,
     vidRest,
     vidStatus,

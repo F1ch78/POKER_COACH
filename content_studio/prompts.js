@@ -108,6 +108,44 @@ const Prompts = (() => {
     return lines.join('\n\n');
   }
 
+  // Промпт видео под лимит символов (у сайтов вроде motion16 — 2000). Части идут по важности:
+  // ракурс и действие остаются всегда, остальное сначала сокращается, потом выбрасывается.
+  // hasFrame — к видео прикладывается кадр шота: внешность героев и место уже на нём, их не описываем.
+  const firstSentence = t => { const m = String(t || '').match(/^[\s\S]*?[.!?](?=\s|$)/); return m ? m[0] : String(t || ''); };   // точка в «2.39:1» — не конец предложения
+  const firstItems = (t, n) => String(t || '').split(/,\s*/).slice(0, n).join(', ');
+
+  function videoFit(p, scene, shot, opts) {
+    const { limit = 0, hasFrame = false } = opts || {};
+    if (shot.override && shot.override.video) return shot.override.video;
+    if (noPicture(shot)) return '';
+    const s = p.style || {};
+    const moving = /движется|moving|handheld/i.test(scene.type);
+    const spoken = shot.dialogue.filter(d => !d.vo).map(d => '«' + d.line.replace(/^\([^)]*\)\s*/, '') + '»').join(' ');
+    const sec = [];
+    const add = (prio, text, short) => { if (text) sec.push({ prio, text, short, cur: text }); };
+    add(0, `${shot.dur}-second shot. ${camera(scene, shot)}${moving ? ', slow motivated camera movement' : ', locked-off static camera'}.`);
+    add(1, [shot.motion, description(shot)].filter(Boolean).join(' '));
+    add(2, spoken && 'The character speaks in Russian, lips in sync: ' + spoken);
+    if (hasFrame) add(3, 'Animate the input image: keep its faces, costumes, place and light exactly.');
+    else {
+      const chars = characters(p, scene, shot).filter(c => c.tags);
+      add(4, chars.map(c => c.tags).join('\n'), chars.map(c => firstItems(c.tags, 5)).join('\n'));
+      const loc = location(p, scene);
+      if (loc && loc.set) add(5, 'SET: ' + loc.set, 'SET: ' + firstSentence(loc.set));
+    }
+    add(6, s.style && 'STYLE: ' + s.style, 'Muted dark cinematic look, low saturation, subtle film grain.');
+    add(7, s.negative && 'Avoid: ' + s.negative, s.negative && 'Avoid: ' + firstItems(s.negative, 10));
+    add(8, shot.sound && 'Diegetic sound (in Russian notes): ' + shot.sound + '.');
+    add(9, !hasFrame && s.look && 'LOOK: ' + s.look, s.look && 'LOOK: ' + firstSentence(s.look));
+    const join = () => sec.filter(x => !x.dropped).map(x => x.cur).join('\n\n');
+    if (!limit || join().length <= limit) return join();
+    const least = sec.slice().sort((a, b) => b.prio - a.prio);
+    for (const x of least) if (x.short && x.cur !== x.short) { x.cur = x.short; if (join().length <= limit) return join(); }
+    for (const x of least) if (x.prio >= 2) { x.dropped = true; if (join().length <= limit) return join(); }
+    const t = join().slice(0, limit - 1);
+    return t.slice(0, Math.max(t.lastIndexOf(' '), limit - 40)) + '…';
+  }
+
   // Имя файла, по которому пакетная загрузка сама находит шот: S05_03.png, S05_03.mp4, S05_03.mp3.
   const code = (scene, shot) => 'S' + String(scene.num).padStart(2, '0') + '_' + String(scene.shots.indexOf(shot) + 1).padStart(2, '0');
 
@@ -137,5 +175,5 @@ const Prompts = (() => {
     return '﻿' + rows.join('\n');
   }
 
-  return { CAMERA, KINDS, noPicture, camera, characters, autoCharacters, location, image, video, code, markdown, csv, isEnglish, description };
+  return { CAMERA, KINDS, noPicture, camera, characters, autoCharacters, location, image, video, videoFit, code, markdown, csv, isEnglish, description };
 })();

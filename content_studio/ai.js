@@ -463,7 +463,7 @@ const AI = (() => {
   // Видео рисуется долго (минуты), поэтому везде одна схема: создать задачу → опрашивать → скачать mp4.
   // openai — /v1/videos (Sora; так же отвечают и шлюзы); fal — очередь fal.ai; replicate — predictions;
   // gemini — Veo через predictLongRunning.
-  const VID_DEFAULTS = { provider: 'none', apiKey: '', baseUrl: '', model: '', extra: '', concurrency: 1 };
+  const VID_DEFAULTS = { provider: 'none', apiKey: '', baseUrl: '', model: '', extra: '', concurrency: 1, maxPrompt: 2000 };
   const videoSettings = () => Object.assign({}, VID_DEFAULTS, settings.video || {});
   const VIDEO_MODELS = {
     same: ['sora-2', 'sora-2-pro'],
