@@ -7,7 +7,9 @@ const AI = (() => {
   // mode: api — запросы прямо из браузера; manual — запрос копируется в Chatbox (или другой чат), ответ вставляется обратно.
   const DEFAULTS = { apiKey: '', model: 'claude-opus-5-5', baseUrl: '', apiPath: '', apiFormat: 'auto', effort: 'medium', mode: 'api' };
   // Шлюзы, адрес которых можно подставить по префиксу ключа.
-  const KNOWN = [{ prefix: 'sk-cvc-', baseUrl: 'https://ru.cheapvibecode.ru/v1', format: 'openai', name: 'CheapVibeCode' }];
+  // imageFormat: как сервис рисует. CheapVibeCode работает через аккаунты ChatGPT — картинки рисует сама GPT-модель
+  // инструментом image_generation (API Responses), отдельные модели картинок там недоступны.
+  const KNOWN = [{ prefix: 'sk-cvc-', baseUrl: 'https://ru.cheapvibecode.ru/v1', format: 'openai', imageFormat: 'responses', name: 'CheapVibeCode' }];
   let settings = Object.assign({}, DEFAULTS);
   try { Object.assign(settings, JSON.parse(localStorage.getItem('cs-ai') || '{}')); } catch (e) {}
 
@@ -37,6 +39,8 @@ const AI = (() => {
   }
 
   function explain(status, msg) {
+    if (/not available through the connected ChatGPT accounts/i.test(msg || ''))
+      return 'Эта модель недоступна у вашего сервиса: он работает через аккаунты ChatGPT. Выберите модель GPT или нажмите «Подобрать автоматически» в ⚙ → «Картинки». (' + status + ': ' + msg + ')';
     const hint = {
       400: 'Сервер не принял запрос — проверьте название модели.',
       401: 'Неверный API-ключ.',
@@ -44,6 +48,7 @@ const AI = (() => {
       403: 'Доступ запрещён — ключ не подходит к этому адресу или регион закрыт.',
       404: 'Не найдено — проверьте адрес API и название модели.',
       429: 'Слишком много запросов или закончился баланс.',
+      503: 'Сервис или модель сейчас недоступны.',
       529: 'Сервер перегружен, повторите через минуту.',
     }[status];
     return (hint ? hint + ' ' : '') + '(' + status + (msg ? ': ' + msg : '') + ')';
@@ -210,6 +215,11 @@ const AI = (() => {
   }
 
   async function postJson(url, hdrs, body) {
+    const text = await postText(url, hdrs, body);
+    try { return JSON.parse(text); } catch (e) { throw new Error('Сервис ответил не JSON: ' + text.slice(0, 120)); }
+  }
+
+  async function postText(url, hdrs, body) {
     let r;
     try { r = await request(url, { method: 'POST', headers: Object.assign({ 'content-type': 'application/json' }, hdrs), body: JSON.stringify(body) }); }
     catch (e) {
@@ -224,8 +234,7 @@ const AI = (() => {
       const err = new Error(explain(r.status, m)); err.status = r.status; err.raw = String(m);
       throw err;
     }
-    if (!json) throw new Error('Сервис ответил не JSON: ' + text.slice(0, 120));
-    return json;
+    return text;
   }
 
   function b64ToBlob(b64, mime) {
@@ -311,36 +320,103 @@ const AI = (() => {
     const err = new Error('Сервис не вернул картинку.'); err.noImage = true; throw err;
   }
 
+  // Ищем в ответе API Responses (обычный JSON или поток событий) готовую картинку инструмента image_generation.
+  function findGenerated(text) {
+    const scan = o => {
+      if (!o || typeof o !== 'object') return null;
+      if (o.type === 'image_generation_call' && typeof o.result === 'string' && o.result.length > 100) return o.result;
+      for (const k in o) { const r = scan(o[k]); if (r) return r; }
+      return null;
+    };
+    try { return scan(JSON.parse(text)); } catch (e) {}
+    let found = null;
+    for (const line of text.split('\n')) {
+      if (!line.startsWith('data:')) continue;
+      try { found = scan(JSON.parse(line.slice(5).trim())) || found; } catch (e) {}
+    }
+    return found;
+  }
+
+  function responsesText(text) {
+    const m = text.match(/"(?:output_)?text"\s*:\s*"((?:[^"\\]|\\.){1,200})/);
+    return m ? m[1] : '';
+  }
+
+  async function genResponses(c, prompt, refs, aspect) {
+    const content = [{ type: 'input_text', text: prompt + `\n\nDraw this image now with the image generation tool. Aspect ratio ${aspect}.` }]
+      .concat(refs.map(r => ({ type: 'input_image', image_url: `data:${r.mime};base64,${r.b64}` })));
+    const body = { model: c.model || settings.model, input: [{ role: 'user', content }],
+      tools: [{ type: 'image_generation', size: aspect === '9:16' ? '1024x1536' : '1536x1024' }], tool_choice: { type: 'image_generation' } };
+    // Особенности шлюза, найденные на прошлых картинках, применяем сразу, чтобы не тратить лишние запросы.
+    const quirks = Object.assign({}, (settings.image || {}).quirks);
+    if (quirks.noToolChoice) delete body.tool_choice;
+    if (quirks.noSize) delete body.tools[0].size;
+    if (quirks.stream) body.stream = true;
+    const learn = q => { Object.assign(quirks, q); save(Object.assign({}, settings, { image: Object.assign({}, settings.image, { quirks }) })); };
+    let text;
+    for (;;) {
+      try { text = await postText(c.root + '/v1/responses', bearer(c), body); break; }
+      catch (e) {
+        // Шлюзы по-разному понимают параметры: убираем тот, на который ругаются, и повторяем.
+        if (e.status === 400 && body.tool_choice && /tool_choice/i.test(e.raw || '')) { delete body.tool_choice; learn({ noToolChoice: true }); continue; }
+        if (e.status === 400 && body.tools[0].size && /size/i.test(e.raw || '')) { delete body.tools[0].size; learn({ noSize: true }); continue; }
+        if (e.status === 400 && !body.stream && /stream/i.test(e.raw || '')) { body.stream = true; learn({ stream: true }); continue; }
+        throw e;
+      }
+    }
+    const b64 = findGenerated(text);
+    if (!b64) {
+      const said = responsesText(text);
+      const err = new Error('Модель не нарисовала картинку' + (said ? ': ' + said : '.')); err.noImage = true; throw err;
+    }
+    return b64ToBlob(b64, 'image/png');
+  }
+
+  // Порядок форматов для «Авто»: сначала запомненный, потом подходящий к сервису и модели.
+  function formatOrder(c) {
+    if (c.format !== 'auto') return [c.format];
+    const all = ['responses', 'chat', 'images'];
+    const saved = (settings.image || {}).detected;
+    const kf = (known(c.key) || {}).imageFormat;
+    const m = c.model;
+    const first = saved || kf || (/gpt-image|dall-e/i.test(m) ? 'images'
+      : /image|banana|imagen|flux|seedream|kandinsky/i.test(m) ? 'chat'
+      : !m || /^(gpt-|o\d|chatgpt|codex)/i.test(m) ? 'responses' : 'images');
+    return [first].concat(all.filter(f => f !== first));
+  }
+
   // Одна картинка: { prompt, refs: [{ mime, b64 }], aspect } → { blob, format }
   async function generateImage({ prompt, refs = [], aspect = '16:9' }) {
     const c = imgCfg();
     if (c.provider === 'same' && direct()) throw new Error('Anthropic не рисует картинки. В ⚙ → «Картинки» выберите сервис картинок.');
     if (!c.key) throw new Error('Укажите ключ сервиса картинок в ⚙ → «Картинки».');
-    if (!c.model) throw new Error('Укажите модель картинок в ⚙ → «Картинки» (кнопка «Проверить картинки» покажет список).');
     if (c.provider === 'custom' && !c.root) throw new Error('Укажите адрес сервиса картинок в ⚙ → «Картинки».');
-    if (c.format === 'gemini') return { blob: await genGemini(c, prompt, refs, aspect), format: 'gemini' };
+    if (c.format === 'gemini') {
+      if (!c.model) throw new Error('Укажите модель картинок в ⚙ → «Картинки» (кнопка «Проверить картинки» покажет список).');
+      return { blob: await genGemini(c, prompt, refs, aspect), format: 'gemini' };
+    }
+    // Без модели картинок можно только через Responses: рисует модель, выбранная для текста.
+    const order = formatOrder(c).filter(f => f === 'responses' || c.model);
+    if (!order.length) throw new Error('Укажите модель картинок в ⚙ → «Картинки» или нажмите там «Подобрать автоматически».');
     const saved = (settings.image || {}).detected;
-    const order = c.format !== 'auto' ? [c.format]
-      : saved ? [saved, saved === 'chat' ? 'images' : 'chat']
-      : /image|banana|imagen|flux|seedream|kandinsky/i.test(c.model) ? ['chat', 'images'] : ['images', 'chat'];
     let first = null;
     for (const f of order) {
       try {
-        const blob = await (f === 'chat' ? genChat : genImages)(c, prompt, refs, aspect);
+        const blob = await ({ chat: genChat, images: genImages, responses: genResponses })[f](c, prompt, refs, aspect);
         if (c.format === 'auto' && saved !== f) save(Object.assign({}, settings, { image: Object.assign({}, settings.image, { detected: f }) }));
         return { blob, format: f };
       } catch (e) {
         if (!first) first = e;
-        const tryOther = c.format === 'auto' && (e.noImage || [404, 405, 415, 422].includes(e.status) || (e.status === 400 && /modalit|not support|unknown|unrecogni|invalid/i.test(e.raw || '')));
+        const tryOther = c.format === 'auto' && (e.noImage || [404, 405, 415, 422, 501, 503].includes(e.status) || (e.status === 400 && /modalit|not support|unknown|unrecogni|invalid|tool/i.test(e.raw || '')));
         if (!tryOther) throw e;
       }
     }
     throw first;
   }
 
-  async function imageModels() {
+  async function imageModels(all) {
     const c = imgCfg();
-    const pick = list => { const img = list.filter(m => /image|banana|imagen|flux|dall|gpt-image|seedream|kandinsky|midjourney|recraft|ideogram/i.test(m)); return img.length ? img : list; };
+    const pick = list => { const img = list.filter(m => /image|banana|imagen|flux|dall|gpt-image|seedream|kandinsky|midjourney|recraft|ideogram/i.test(m)); return all || !img.length ? list : img; };
     try {
       if (c.format === 'gemini') {
         const r = await request(c.root + '/v1beta/models?pageSize=200', { headers: { 'x-goog-api-key': c.key } });
@@ -353,6 +429,34 @@ const AI = (() => {
       const j = await r.json();
       return pick((j.data || j.models || []).map(m => m.id || m.name).filter(Boolean));
     } catch (e) { return []; }
+  }
+
+  // Подбор рабочего способа рисовать: перебираем модели и форматы на маленькой тестовой картинке.
+  async function autoPickImage(onStep) {
+    const c = imgCfg();
+    if (c.format === 'gemini') throw new Error('Для Gemini выберите модель из списка и нажмите «Проверить картинки».');
+    const list = await imageModels(true);
+    const cands = [];
+    const add = (format, model) => { if (model && !cands.some(x => x.format === format && x.model === model)) cands.push({ format, model }); };
+    add('responses', settings.model);
+    list.filter(m => /^(gpt-5|gpt-4\.1|gpt-4o|o\d)/i.test(m) && !/image|audio|realtime|transcri|tts|search|codex-mini/i.test(m)).slice(0, 3).forEach(m => add('responses', m));
+    list.filter(m => /gpt-image|dall-e/i.test(m)).slice(0, 2).forEach(m => add('images', m));
+    list.filter(m => /image|banana|imagen|flux|seedream/i.test(m) && !/gpt-image|dall-e/i.test(m)).slice(0, 3).forEach(m => add('chat', m));
+    const before = settings.image;
+    for (const cand of cands.slice(0, 8)) {
+      onStep(`Пробую ${cand.model} (${cand.format})…`);
+      save(Object.assign({}, settings, { image: Object.assign({}, before, { model: cand.model, format: cand.format, detected: '' }) }));
+      try {
+        const t0 = performance.now();
+        const r = await generateImage({ prompt: 'A single red apple on a dark wooden table, soft side light, photographic film still. No text.', aspect: '16:9' });
+        return Object.assign({ ms: performance.now() - t0 }, cand, r);
+      } catch (e) {
+        onStep(`✗ ${cand.model} (${cand.format}): ${e.message.slice(0, 140)}`);
+        if (e.status === 401 || e.network) { save(Object.assign({}, settings, { image: before })); throw e; }
+      }
+    }
+    save(Object.assign({}, settings, { image: before }));
+    throw new Error('Ни один вариант не сработал. Похоже, ваш сервис не умеет рисовать картинки — выберите в «Сервис» Google Gemini или другой сервис картинок.');
   }
 
   const VISUAL_RULES = `Rules for every description:
@@ -391,5 +495,5 @@ const AI = (() => {
   }
 
   return { get settings() { return settings; }, save, known, call, ping, models, describeScene, locationSet, characterTags, setManual: fn => { manual = fn; }, bridge,
-    imageSettings, generateImage, imageModels };
+    imageSettings, generateImage, imageModels, autoPickImage, imageNeedsModel: () => { const c = imgCfg(); return c.format === 'gemini' || formatOrder(c)[0] !== 'responses'; } };
 })();

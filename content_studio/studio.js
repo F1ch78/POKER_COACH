@@ -1053,6 +1053,7 @@ async function recordVideo(status, playBtn) {
 }
 
 // ---------------------------------------------------------------- настройки
+const FORMAT_NAMES = { gemini: 'Gemini', chat: 'через чат', images: '/images/generations', responses: 'GPT рисует сам (/responses)' };
 function openSettings() {
   const s = AI.settings;
   const mode = h('select', {}, [['api', 'Напрямую из браузера'], ['manual', 'Через Chatbox: копировать запрос и вставлять ответ']]
@@ -1092,8 +1093,8 @@ function openSettings() {
   const imgKey = h('input', { type: 'password', value: is.apiKey, placeholder: 'ключ сервиса картинок', autocomplete: 'off' });
   const imgBase = h('input', { value: is.baseUrl, autocomplete: 'off', autocapitalize: 'off' });
   const imgModels = h('datalist', { id: 'cs-img-models' });
-  const imgModel = h('input', { value: is.model, list: 'cs-img-models', placeholder: 'нажмите «Проверить картинки» — появится список', autocomplete: 'off' });
-  const imgFormat = h('select', {}, [['auto', 'Авто'], ['chat', 'Через чат (/chat/completions, как Nano Banana у шлюзов)'], ['images', '/images/generations (без референсов)']]
+  const imgModel = h('input', { value: is.model, list: 'cs-img-models', placeholder: 'пусто — модель текста; список — «Проверить картинки»', autocomplete: 'off' });
+  const imgFormat = h('select', {}, [['auto', 'Авто'], ['responses', 'GPT рисует сам (/responses — аккаунты ChatGPT, CheapVibeCode)'], ['chat', 'Через чат (/chat/completions, как Nano Banana у шлюзов)'], ['images', '/images/generations (без референсов)']]
     .map(([v, l]) => h('option', { value: v, selected: is.format === v }, l)));
   const imgConc = h('select', {}, [1, 2, 3, 4].map(n => h('option', { value: n, selected: +is.concurrency === n }, n)));
   const imgStatus = h('div', { class: 'small' });
@@ -1109,6 +1110,20 @@ function openSettings() {
   const imgValues = () => ({ provider: imgProvider.value, apiKey: imgKey.value.trim(), baseUrl: imgBase.value.trim(), model: imgModel.value.trim(),
     format: imgFormat.value, concurrency: +imgConc.value,
     detected: imgProvider.value === is.provider && imgBase.value.trim() === is.baseUrl && imgModel.value.trim() === is.model ? is.detected : '' });
+  // Перебор моделей и форматов на тестовой картинке: студия сама находит рабочий способ.
+  const pickImage = async () => {
+    AI.save(Object.assign(values(), { image: Object.assign(imgValues(), { format: imgProvider.value === 'gemini' ? 'gemini' : 'auto' }) }));
+    const log = h('div', { class: 'muted pick-log' });
+    fill(imgStatus, log);
+    try {
+      const r = await AI.autoPickImage(line => log.append(h('div', {}, line)));
+      imgModel.value = r.model; imgFormat.value = r.format;
+      fill(imgStatus, h('div', { class: 'ok' }, `✓ Нашёл: модель ${r.model}, формат ${FORMAT_NAMES[r.format]}, ${(r.ms / 1000).toFixed(0)} с. Нажмите «Сохранить».`),
+        log, h('img', { src: URL.createObjectURL(r.blob), class: 'test-img', alt: '' }));
+    } catch (e) {
+      fill(imgStatus, h('div', { class: 'warn' }, e.message), log);
+    }
+  };
   const testImage = async () => {
     const before = Object.assign({}, AI.settings);
     AI.save(Object.assign(values(), { image: imgValues() }));
@@ -1116,7 +1131,7 @@ function openSettings() {
     try {
       const list = await AI.imageModels();
       if (list.length) fill(imgModels, ...list.map(m => h('option', { value: m })));
-      if (!imgModel.value.trim()) {
+      if (!imgModel.value.trim() && AI.imageNeedsModel()) {
         AI.save(before);
         return fill(imgStatus, list.length
           ? h('div', {}, `Моделей картинок: ${list.length} — ${list.slice(0, 8).join(', ')}${list.length > 8 ? '…' : ''}. Выберите одну в поле «Модель» и нажмите «Проверить картинки» ещё раз.`)
@@ -1127,7 +1142,7 @@ function openSettings() {
       const r = await AI.generateImage({ prompt: 'A single red apple on a dark wooden table, soft side light from a window, photographic film still. No text.', aspect: '16:9' });
       const url = URL.createObjectURL(r.blob);
       AI.save(Object.assign({}, AI.settings));
-      fill(imgStatus, h('div', { class: 'ok' }, `✓ Картинки работают: формат ${({ gemini: 'Gemini', chat: 'через чат', images: '/images/generations' })[r.format]}, ${((performance.now() - t0) / 1000).toFixed(0)} с.`),
+      fill(imgStatus, h('div', { class: 'ok' }, `✓ Картинки работают: формат ${FORMAT_NAMES[r.format]}, ${((performance.now() - t0) / 1000).toFixed(0)} с.`),
         r.format === 'images' ? h('div', { class: 'muted' }, 'В этом формате референсы героев не передаются — лица могут «плыть» от кадра к кадру.') : null,
         h('img', { src: url, class: 'test-img', alt: '' }));
     } catch (e) {
@@ -1168,7 +1183,7 @@ function openSettings() {
     imgKeyField, imgBaseField,
     h('div', { class: 'row wrap' }, field('Модель', imgModel), imgModels, imgFormatField, field('Одновременно', imgConc)),
     imgStatus,
-    h('div', { class: 'row' }, btn('Проверить картинки', testImage)),
+    h('div', { class: 'row' }, btn('Подобрать автоматически', pickImage, 'primary', 'Перепробовать модели и способы на тестовой картинке и запомнить рабочий'), btn('Проверить картинки', testImage)),
     h('div', { class: 'row' }, h('span', { class: 'grow' }),
       btn('Отмена', () => dlg.close(), 'ghost'),
       btn('Сохранить', () => { AI.save(Object.assign(values(), { image: imgValues() })); dlg.close(); toast('Сохранено'); render(); }, 'primary')));
