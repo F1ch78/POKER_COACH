@@ -923,6 +923,10 @@ function openSettings() {
   const status = h('div', { class: 'small' });
   const keyHint = h('div', { class: 'muted small' });
   const apiBox = h('div', {});
+  const bridgeLine = h('div', { class: 'small' });
+  AI.bridge().then(ok => fill(bridgeLine, ok
+    ? h('div', { class: 'ok' }, '✓ Студия открыта через мост (start-studio.bat): запросы к сервису идут с компьютера, как в Chatbox.')
+    : h('div', { class: 'muted' }, 'Студия открыта как файл. Если «Проверить связь» пишет «Нет связи», а в Chatbox ключ работает — закройте эту вкладку и запустите start-studio.bat из папки студии.')));
   // Ключ шлюза с известным префиксом сам подставляет его адрес.
   const onKey = () => {
     const k = AI.known(key.value);
@@ -949,13 +953,14 @@ function openSettings() {
     } catch (e) {
       AI.save(before);
       fill(status, h('div', { class: 'warn' }, e.message,
-        e.network ? h('div', {}, 'Если в Chatbox этот ключ работает, а здесь нет — сервис не принимает запросы из браузера. Выберите вверху режим «Через Chatbox».') :
+        e.network ? h('div', {}, 'Если в Chatbox этот ключ работает, а здесь нет — откройте студию через start-studio.bat или выберите вверху режим «Через Chatbox».') :
         (e.status === 400 || e.status === 404) ? h('div', {}, 'Возможно, у сервиса другое название модели или путь. Сверьте с настройками Chatbox: Host, Path и модель.') : null));
     }
   };
   const dlg = h('dialog', {},
     h('h3', {}, 'Подключение к ИИ'),
     h('p', { class: 'muted small' }, 'Нужно для кнопок «ИИ»: английские описания шотов, SET локаций, тег-сеты героев. Ключ хранится только в этом браузере. Без ключа работает всё остальное.'),
+    bridgeLine,
     field('Как подключаться', mode),
     apiBox,
     status,

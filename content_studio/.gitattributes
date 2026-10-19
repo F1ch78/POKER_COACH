@@ -1,0 +1,3 @@
+# Windows-файлы моста храним как есть: CRLF и BOM нужны PowerShell и cmd.
+*.bat -text
+*.ps1 -text

@@ -49,15 +49,32 @@ const AI = (() => {
     return (hint ? hint + ' ' : '') + '(' + status + (msg ? ': ' + msg : '') + ')';
   }
 
+  // Мост (server.ps1): если студия открыта через start-studio.bat, запросы идут через программу на компьютере,
+  // как в Chatbox, и запрет браузера на чужие адреса (CORS) не мешает.
+  let bridgeCheck = null;
+  function bridge() {
+    if (!bridgeCheck) bridgeCheck = /^https?:$/.test(location.protocol)
+      ? fetch('/__studio', { cache: 'no-store' }).then(r => r.ok ? r.json() : null).then(j => !!(j && j.bridge)).catch(() => false)
+      : Promise.resolve(false);
+    return bridgeCheck;
+  }
+
+  async function request(url, opts) {
+    if (!(await bridge())) return fetch(url, opts);
+    return fetch('/proxy', Object.assign({}, opts, { headers: Object.assign({}, opts.headers, { 'x-studio-target': url }) }));
+  }
+
   async function send(fmt, body) {
     const url = endpoint(fmt);
     let resp;
     try {
-      resp = await fetch(url, { method: 'POST', headers: headers(fmt), body: JSON.stringify(body) });
+      resp = await request(url, { method: 'POST', headers: headers(fmt), body: JSON.stringify(body) });
     } catch (e) {
-      const err = new Error(direct()
-        ? 'Нет связи с сервером Claude. Проверьте интернет; из России обычно нужен VPN или шлюз-посредник.'
-        : 'Нет связи с ' + root() + '. Проверьте адрес и интернет. Если адрес верный, сервер, возможно, не принимает запросы из браузера.');
+      const err = new Error(await bridge()
+        ? 'Мост не отвечает. Проверьте, что окно start-studio.bat открыто.'
+        : direct()
+          ? 'Нет связи с сервером Claude. Проверьте интернет; из России обычно нужен VPN или шлюз-посредник.'
+          : 'Нет связи с ' + root() + '. Браузер не пускает запросы к этому сервису. Откройте студию через start-studio.bat (как Chatbox) или включите режим «Через Chatbox».');
       err.network = true;
       throw err;
     }
@@ -166,7 +183,7 @@ const AI = (() => {
     for (const fmt of ['anthropic', 'openai']) {
       try {
         const h = headers(fmt); delete h['content-type'];
-        const r = await fetch(root() + '/v1/models', { headers: h });
+        const r = await request(root() + '/v1/models', { headers: h });
         if (!r.ok) continue;
         const j = await r.json();
         const list = (j.data || j.models || []).map(m => m.id || m.name).filter(Boolean);
@@ -211,5 +228,5 @@ const AI = (() => {
     return (await call({ system, user: `Character: ${name}. Write only the tag-set.`, maxTokens: 4000 })).trim();
   }
 
-  return { get settings() { return settings; }, save, known, call, ping, models, describeScene, locationSet, characterTags, setManual: fn => { manual = fn; } };
+  return { get settings() { return settings; }, save, known, call, ping, models, describeScene, locationSet, characterTags, setManual: fn => { manual = fn; }, bridge };
 })();
