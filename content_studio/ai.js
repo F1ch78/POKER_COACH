@@ -4,9 +4,10 @@
 // или OpenAI-совместимый (/v1/chat/completions) определяется сам при первом запросе.
 
 const AI = (() => {
-  const DEFAULTS = { apiKey: '', model: 'claude-opus-5-5', baseUrl: '', apiFormat: 'auto', effort: 'medium' };
+  // mode: api — запросы прямо из браузера; manual — запрос копируется в Chatbox (или другой чат), ответ вставляется обратно.
+  const DEFAULTS = { apiKey: '', model: 'claude-opus-5-5', baseUrl: '', apiPath: '', apiFormat: 'auto', effort: 'medium', mode: 'api' };
   // Шлюзы, адрес которых можно подставить по префиксу ключа.
-  const KNOWN = [{ prefix: 'sk-cvc-', baseUrl: 'https://ru.cheapvibecode.ru/v1', name: 'CheapVibeCode' }];
+  const KNOWN = [{ prefix: 'sk-cvc-', baseUrl: 'https://ru.cheapvibecode.ru/v1', format: 'openai', name: 'CheapVibeCode' }];
   let settings = Object.assign({}, DEFAULTS);
   try { Object.assign(settings, JSON.parse(localStorage.getItem('cs-ai') || '{}')); } catch (e) {}
 
@@ -15,6 +16,13 @@ const AI = (() => {
   const baseFor = () => settings.baseUrl || (known(settings.apiKey) || {}).baseUrl || 'https://api.anthropic.com';
   // Адрес можно вписывать и с /v1 на конце, и без.
   const root = () => baseFor().trim().replace(/\/+$/, '').replace(/\/v1$/, '');
+  // Как в Chatbox: если задан путь API, адрес запроса = Host + Path, а формат следует из пути.
+  const pathFormat = () => settings.apiPath ? (/messages/i.test(settings.apiPath) ? 'anthropic' : 'openai') : null;
+  function endpoint(fmt) {
+    if (settings.apiPath) return baseFor().trim().replace(/\/+$/, '') + '/' + settings.apiPath.trim().replace(/^\/+/, '');
+    return root() + (fmt === 'openai' ? '/v1/chat/completions' : '/v1/messages');
+  }
+  let manual = null;   // интерфейс подставляет сюда окно «запрос через Chatbox»
   const direct = () => { try { return /(^|\.)api\.anthropic\.com$/i.test(new URL(root()).hostname); } catch (e) { return false; } };
 
   function headers(fmt) {
@@ -42,7 +50,7 @@ const AI = (() => {
   }
 
   async function send(fmt, body) {
-    const url = root() + (fmt === 'openai' ? '/v1/chat/completions' : '/v1/messages');
+    const url = endpoint(fmt);
     let resp;
     try {
       resp = await fetch(url, { method: 'POST', headers: headers(fmt), body: JSON.stringify(body) });
@@ -85,26 +93,37 @@ const AI = (() => {
     return Array.isArray(c) ? c.map(x => x.text || '').join('') : (c || '');
   }
 
-  // Один запрос с автоопределением формата: сначала Anthropic, при отказе — OpenAI-совместимый.
-  async function call({ system, user, schema, maxTokens = 16000 }) {
-    if (!settings.apiKey) throw new Error('Укажите API-ключ в настройках (⚙).');
+  async function call({ system, user, schema, maxTokens = 16000, noManual }) {
     // Шлюзы не всегда поддерживают структурированный ответ, поэтому формат JSON всегда дублируем в тексте.
     if (schema) user += '\n\nReturn only a JSON object matching this JSON Schema, with no other text:\n' + JSON.stringify(schema);
-    const fmt = settings.apiFormat === 'auto' ? (settings.detected || 'anthropic') : settings.apiFormat;
+    if (settings.mode === 'manual' && manual && !noManual) return parse(await manual({ system, user }), schema);
+    if (!settings.apiKey) throw new Error('Укажите API-ключ в настройках (⚙) или включите режим «через Chatbox».');
+    try {
+      return parse(await viaApi({ system, user, schema, maxTokens }), schema);
+    } catch (e) {
+      // Браузер не достучался до сервиса (часто это запрет CORS) — предлагаем сделать этот запрос через Chatbox.
+      if (e.network && manual && !noManual) return parse(await manual({ system, user, reason: e.message }), schema);
+      throw e;
+    }
+  }
+
+  // Один запрос с автоопределением формата: при отказе пробуем второй формат (Anthropic ↔ OpenAI-совместимый).
+  async function viaApi({ system, user, schema, maxTokens }) {
+    const fmt = pathFormat() || (settings.apiFormat === 'auto' ? (settings.detected || (known(settings.apiKey) || {}).format || 'anthropic') : settings.apiFormat);
     let text;
     try {
       text = await callAs(fmt, { system, user, schema, maxTokens });
     } catch (e) {
       const other = fmt === 'anthropic' ? 'openai' : 'anthropic';
-      const switchable = settings.apiFormat === 'auto' && !direct() && (e.network || [400, 404, 405, 415, 422].includes(e.status));
+      const switchable = settings.apiFormat === 'auto' && !settings.apiPath && !direct() && (e.network || [400, 404, 405, 415, 422].includes(e.status));
       if (!switchable) throw e;
       try { text = await callAs(other, { system, user, schema, maxTokens }); }
       catch (e2) { throw e2.network || e2.status === 404 ? e : e2; }
       save(Object.assign({}, settings, { detected: other }));
-      return parse(text, schema);
+      return text;
     }
     if (settings.apiFormat === 'auto' && settings.detected !== fmt) save(Object.assign({}, settings, { detected: fmt }));
-    return parse(text, schema);
+    return text;
   }
 
   async function callAs(fmt, req) {
@@ -138,9 +157,9 @@ const AI = (() => {
   // Проверка связи: короткий запрос и список моделей сервиса (если он его отдаёт).
   async function ping() {
     const t0 = performance.now();
-    const answer = await call({ system: 'Answer with one word.', user: 'Скажи «ок».', maxTokens: 400 });
-    const fmt = settings.apiFormat === 'auto' ? settings.detected : settings.apiFormat;
-    return { answer: answer.replace(/```\w*/g, '').trim().slice(0, 40), fmt, ms: Math.round(performance.now() - t0), base: root() };
+    const answer = await call({ system: 'Answer with one word.', user: 'Скажи «ок».', maxTokens: 400, noManual: true });
+    const fmt = pathFormat() || (settings.apiFormat === 'auto' ? settings.detected : settings.apiFormat);
+    return { answer: answer.replace(/```\w*/g, '').trim().slice(0, 40), fmt, ms: Math.round(performance.now() - t0), url: endpoint(fmt) };
   }
 
   async function models() {
@@ -192,5 +211,5 @@ const AI = (() => {
     return (await call({ system, user: `Character: ${name}. Write only the tag-set.`, maxTokens: 4000 })).trim();
   }
 
-  return { get settings() { return settings; }, save, known, call, ping, models, describeScene, locationSet, characterTags };
+  return { get settings() { return settings; }, save, known, call, ping, models, describeScene, locationSet, characterTags, setManual: fn => { manual = fn; } };
 })();

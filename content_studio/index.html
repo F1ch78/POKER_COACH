@@ -52,6 +52,9 @@
   .cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(380px, 1fr)); gap: 12px; }
   .card { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 14px; min-width: 0; }
   .ok { color: #9fc49b; }
+  .mono { font: 12px/1.4 ui-monospace, monospace; }
+  dialog.manual { width: min(720px, calc(100vw - 32px)); }
+  dialog ol { padding-left: 20px; }
   .card.warn, .warn { background: var(--warn); border-color: #5b4520; border-radius: 10px; padding: 10px 14px; margin-top: 14px; }
   .field { display: flex; flex-direction: column; gap: 4px; margin-top: 8px; flex: 1; min-width: 0; }
   .field > span { font-size: 12px; color: var(--muted); }
