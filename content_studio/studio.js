@@ -552,6 +552,7 @@ function renderBoard() {
         btn('⧉ Все промпты картинок', () => copy(sc.shots.map(sh => `### ${Prompts.code(sc, sh)}\n${Prompts.image(p, sc, sh)}`).filter(s => !/\n$/.test(s)).join('\n\n'), 'Промпты картинок')),
         btn('⧉ Все промпты видео', () => copy(sc.shots.map(sh => `### ${Prompts.code(sc, sh)}\n${Prompts.video(p, sc, sh)}`).filter(s => !/\n$/.test(s)).join('\n\n'), 'Промпты видео')),
         btn(`🎨 Картинки сцены (${emptyShots([sc]).length})`, () => genBatch(emptyShots([sc])), '', 'Сгенерировать картинки для шотов сцены, где их ещё нет'),
+        btn(`🎬 Видео сцены (${noVideoShots([sc]).length})`, () => genBatch(noVideoShots([sc]), 'video'), '', 'Оживить кадры сцены, где ещё нет видео (через сервис видео из ⚙)'),
         btn('Ассеты пачкой', async () => bulkAssets(await pickFile('image/*,video/*,audio/*', true)), '', 'Файлы с именами S05_03.png, S05_03.mp4 разложатся по шотам'),
         btn('Длительности по сценарию', () => { sc.shots.forEach(s => { if (s.kind !== 'ПАУЗА') s.pinnedDur = false; }); Parser.fitDurations(sc); touch(); render(); }),
         btn('▶ Смотреть сцену', () => { S.range = sc.id; S.tab = 'edit'; render(); }),
@@ -649,6 +650,7 @@ function shotCard(sc, sh, i) {
         btn('Промпты ▾', showPrompts, 'chip ghost'),
         h('span', { class: 'grow' }),
         btn(genBusy.has(sh.id) ? '🎨 …' : sh.assets.image ? '🎨 ещё вариант' : '🎨 Сгенерировать', () => genOne(sc, sh), 'chip gen', 'Сгенерировать картинку по промпту с референсами героев и локации'),
+        videoButton(sc, sh, 'chip gen'),
         ['image', 'video', 'audio'].map(slot => assetSlot(sh, slot))) :
         h('div', { class: 'row' }, assetSlot(sh, 'audio')),
       promptsBox));
@@ -712,17 +714,58 @@ async function genShot(sc, sh) {
   const { blob } = await AI.generateImage({ prompt, refs: payload, aspect: aspectFor() });
   const ext = ((blob.type || 'image/png').split('/')[1] || 'png').replace('jpeg', 'jpg');
   const id = await addAsset(new File([blob], `${Prompts.code(sc, sh)}.${ext}`, { type: blob.type || 'image/png' }));
-  // прежний вариант не удаляем: он остаётся в истории шота, его можно вернуть в просмотре
-  if (sh.assets.image) {
-    sh.history = [sh.assets.image].concat(sh.history || []);
-    sh.history.splice(6).forEach(old => setTimeout(() => dropAsset(old)));
-  }
+  keepOld(sh, 'image');   // прежний вариант остаётся в истории, его можно вернуть в просмотре
   sh.assets.image = id;
   touch();
   return id;
 }
 
-const GEN = { running: false, stop: false, queue: [], current: [], done: 0, total: 0, errors: [] };
+// ---- видео
+// Кадр шота как первый кадр для image-to-video: JPEG до 1280 px.
+async function frameData(id) {
+  const blob = await DB.getBlob(id);
+  if (!blob) return null;
+  const bmp = await createImageBitmap(blob);
+  const k = Math.min(1, 1280 / Math.max(bmp.width, bmp.height));
+  const c = h('canvas', { width: Math.round(bmp.width * k), height: Math.round(bmp.height * k) });
+  c.getContext('2d').drawImage(bmp, 0, 0, c.width, c.height);
+  const jpg = await new Promise(r => c.toBlob(r, 'image/jpeg', 0.92));
+  const b64 = await new Promise(r => { const fr = new FileReader(); fr.onload = () => r(String(fr.result).split(',')[1]); fr.readAsDataURL(jpg); });
+  return { blob: jpg, mime: 'image/jpeg', b64 };
+}
+
+// С первым кадром модели не нужны описания героев и места — они уже на картинке; нужны движение, реплика и стиль.
+function videoApiPrompt(sc, sh, hasFrame) {
+  if (sh.override && sh.override.video) return sh.override.video;
+  if (!hasFrame) return Prompts.video(S.p, sc, sh);
+  const spoken = sh.dialogue.filter(d => !d.vo).map(d => '«' + d.line.replace(/^\([^)]*\)\s*/, '') + '»').join(' ');
+  return [Prompts.camera(sc, sh) + '.', sh.motion, Prompts.description(sh),
+    spoken && 'The character speaks in Russian, lips in sync: ' + spoken,
+    'Animate the input image: keep its faces, costumes, place and light. Muted dark cinematic look, subtle film grain. No text, no music.']
+    .filter(Boolean).join(' ');
+}
+
+async function genVideoShot(sc, sh, onProgress, shouldStop) {
+  const frame = sh.assets.image ? await frameData(sh.assets.image) : null;
+  const blob = await AI.generateVideo({ prompt: videoApiPrompt(sc, sh, !!frame), image: frame, seconds: +sh.dur || 5,
+    aspect: aspectFor(), onProgress, shouldStop });
+  const id = await addAsset(new File([blob], `${Prompts.code(sc, sh)}.mp4`, { type: blob.type || 'video/mp4' }));
+  keepOld(sh, 'video');
+  sh.assets.video = id;
+  touch();
+  return id;
+}
+
+// Прежний вариант картинки или видео не удаляем: он уходит в историю шота (до 6 штук).
+function keepOld(sh, slot) {
+  if (!sh.assets[slot]) return;
+  sh.history = [sh.assets[slot]].concat(sh.history || []);
+  sh.history.splice(8).forEach(old => setTimeout(() => dropAsset(old)));
+}
+
+// ---- пакетная генерация (картинки или видео)
+const GEN = { running: false, kind: 'image', stop: false, queue: [], current: [], done: 0, total: 0, errors: [], status: {} };
+const KIND = { image: { icon: '🎨', many: 'Картинки', done: 'картинок' }, video: { icon: '🎬', many: 'Видео', done: 'видео' } };
 let genRenderTimer = null;
 function renderSoon() {
   clearTimeout(genRenderTimer);
@@ -737,33 +780,36 @@ function renderGenBar() {
   if (!bar) return;
   if (!GEN.running && !GEN.errors.length) { bar.replaceChildren(); bar.className = 'hidden'; return; }
   bar.className = 'genbar';
-  const pct = GEN.total ? Math.round(100 * GEN.done / GEN.total) : 0;
+  const k = KIND[GEN.kind], pct = GEN.total ? Math.round(100 * GEN.done / GEN.total) : 0;
   fill(bar,
-    h('span', {}, GEN.running ? `🎨 Картинки: ${GEN.done} из ${GEN.total}` : `🎨 Готово: ${GEN.done - GEN.errors.length} из ${GEN.total}`),
-    GEN.running && GEN.current.length ? h('span', { class: 'muted' }, 'сейчас ' + GEN.current.map(x => Prompts.code(x.sc, x.sh)).join(', ')) : null,
+    h('span', {}, GEN.running ? `${k.icon} ${k.many}: ${GEN.done} из ${GEN.total}` : `${k.icon} Готово: ${GEN.done - GEN.errors.length} из ${GEN.total}`),
+    GEN.running && GEN.current.length ? h('span', { class: 'muted' }, 'сейчас ' + GEN.current.map(x => Prompts.code(x.sc, x.sh) + (GEN.status[x.sh.id] ? ` (${GEN.status[x.sh.id]})` : '')).join(', ')) : null,
     h('i', { class: 'bar grow' }, h('b', { style: `width:${pct}%` })),
     GEN.errors.length ? h('details', {}, h('summary', {}, `ошибок: ${GEN.errors.length}`), h('div', { class: 'small' }, GEN.errors.map(e => h('div', {}, e)))) : null,
     GEN.running ? btn(GEN.stop ? 'Останавливаю…' : 'Остановить', () => { GEN.stop = true; renderGenBar(); }, 'ghost small')
       : btn('✕', () => { GEN.errors = []; GEN.total = 0; renderGenBar(); }, 'ghost small'));
 }
 
-// Пакетная генерация: несколько запросов параллельно, ошибки не останавливают очередь
-// (кроме неверного ключа и закончившегося баланса).
-async function genBatch(items) {
+// Несколько задач параллельно; ошибки не останавливают очередь (кроме ключа, баланса и обрыва связи).
+async function genBatch(items, kind = 'image') {
   if (GEN.running) return toast('Генерация уже идёт — дождитесь или остановите её');
-  if (!items.length) return toast('Нечего генерировать: у всех шотов уже есть картинки');
-  Object.assign(GEN, { running: true, stop: false, queue: items.slice(), current: [], done: 0, total: items.length, errors: [] });
+  if (!items.length) return toast(kind === 'video' ? 'Нечего генерировать: у всех шотов уже есть видео' : 'Нечего генерировать: у всех шотов уже есть картинки');
+  Object.assign(GEN, { running: true, kind, stop: false, queue: items.slice(), current: [], done: 0, total: items.length, errors: [], status: {} });
   render();
-  const n = Math.max(1, Math.min(4, +AI.imageSettings().concurrency || 2));
+  const conf = kind === 'video' ? AI.videoSettings() : AI.imageSettings();
+  const n = Math.max(1, Math.min(4, +conf.concurrency || (kind === 'video' ? 1 : 2)));
   const worker = async () => {
     while (!GEN.stop && GEN.queue.length) {
       const it = GEN.queue.shift();
       GEN.current.push(it); renderGenBar();
-      try { await genShot(it.sc, it.sh); }
-      catch (e) {
-        GEN.errors.push(`${Prompts.code(it.sc, it.sh)}: ${e.message}`);
+      try {
+        if (kind === 'video') await genVideoShot(it.sc, it.sh, t => { GEN.status[it.sh.id] = t; renderGenBar(); }, () => GEN.stop);
+        else await genShot(it.sc, it.sh);
+      } catch (e) {
+        if (!GEN.stop || e.message !== 'Остановлено') GEN.errors.push(`${Prompts.code(it.sc, it.sh)}: ${e.message}`);
         if ([401, 402, 403].includes(e.status) || e.network) GEN.stop = true;
       }
+      delete GEN.status[it.sh.id];
       GEN.current = GEN.current.filter(x => x !== it);
       GEN.done++;
       renderSoon();
@@ -771,20 +817,38 @@ async function genBatch(items) {
   };
   await Promise.all(Array.from({ length: n }, worker));
   GEN.running = false;
-  toast(GEN.errors.length ? `Картинки готовы с ошибками: ${GEN.errors.length}` : `Готово картинок: ${GEN.done}`);
+  toast(GEN.errors.length ? `${KIND[kind].many}: готово с ошибками (${GEN.errors.length})` : `Готово ${KIND[kind].done}: ${GEN.done}`);
   render();
 }
 
 const emptyShots = scenes => scenes.flatMap(sc => sc.shots.filter(sh => !Prompts.noPicture(sh) && !sh.assets.image && !sh.assets.video).map(sh => ({ sc, sh })));
+const noVideoShots = scenes => scenes.flatMap(sc => sc.shots.filter(sh => !Prompts.noPicture(sh) && !sh.assets.video).map(sh => ({ sc, sh })));
 
-const genBusy = new Set();   // шоты, для которых сейчас рисуется картинка (в проект не сохраняется)
-async function genOne(sc, sh) {
+function videoButton(sc, sh, cls) {
+  const busy = genBusy.get(sh.id);
+  return h('button', { class: cls, 'data-busy': sh.id, onclick: () => genOne(sc, sh, 'video'),
+    title: sh.assets.image ? 'Оживить кадр через сервис видео' : 'У шота нет картинки — видео будет сделано только по тексту' },
+    busy ? '🎬 ' + busy : sh.assets.video ? '🎬 ещё вариант' : '🎬 Видео');
+}
+
+// Одиночная генерация; шоты, над которыми идёт работа, — в памяти, не в проекте.
+const genBusy = new Map();   // id шота → текст состояния
+async function genOne(sc, sh, kind = 'image') {
   if (GEN.running) return toast('Идёт пакетная генерация — дождитесь её');
   if (genBusy.has(sh.id)) return;
-  genBusy.add(sh.id); render();
-  try { await genShot(sc, sh); toast(Prompts.code(sc, sh) + ': картинка готова'); }
-  catch (e) { toast(Prompts.code(sc, sh) + ': ' + e.message); }
+  genBusy.set(sh.id, '…'); render();
+  const code = Prompts.code(sc, sh);
+  try {
+    if (kind === 'video') {
+      await genVideoShot(sc, sh, t => { genBusy.set(sh.id, t); updateBusyLabels(sh.id); });
+      toast(code + ': видео готово');
+    } else { await genShot(sc, sh); toast(code + ': картинка готова'); }
+  } catch (e) { toast(code + ': ' + e.message); }
   genBusy.delete(sh.id); render();
+}
+// Прогресс долгого видео обновляем точечно, не перерисовывая страницу.
+function updateBusyLabels(id) {
+  document.querySelectorAll(`[data-busy="${id}"]`).forEach(b => { b.textContent = '🎬 ' + genBusy.get(id); });
 }
 
 // ---------------------------------------------------------------- просмотр ассета крупно
@@ -799,12 +863,14 @@ function openViewer(sh, sc) {
     fill(box, el, h('div', { class: 'muted small' }, `${meta.name} · ${(meta.size / 1048576).toFixed(1)} МБ` + (meta.duration ? ` · ${meta.duration} с` : '')));
   };
   const history = (sh.history || []).filter(id => S.p.assets[id]);
-  const variants = history.length && sh.assets.image ? h('div', { class: 'variants' },
+  const kindOf = id => S.p.assets[id].type.startsWith('video') ? 'video' : 'image';
+  const variants = history.length ? h('div', { class: 'variants' },
     h('span', { class: 'muted small' }, 'Прошлые варианты — щёлкните, чтобы вернуть:'),
-    history.map(id => h('button', { class: 'variant', title: 'Сделать основной картинкой', onclick: () => {
-      sh.history = [sh.assets.image].concat(history.filter(x => x !== id));
-      sh.assets.image = id; touch(); dlg.close(); render(); toast('Вариант возвращён');
-    } }, thumb(id, '')))) : null;
+    history.map(id => h('button', { class: 'variant', title: kindOf(id) === 'video' ? 'Сделать основным видео' : 'Сделать основной картинкой', onclick: () => {
+      const slot = kindOf(id);
+      sh.history = (sh.assets[slot] ? [sh.assets[slot]] : []).concat(history.filter(x => x !== id));
+      sh.assets[slot] = id; touch(); dlg.close(); render(); toast('Вариант возвращён');
+    } }, thumb(id, ''), kindOf(id) === 'video' ? h('span', { class: 'vbadge' }, '🎬') : null))) : null;
   const dlg = h('dialog', { class: 'viewer' },
     h('div', { class: 'row' }, h('b', {}, `${Prompts.code(sc, sh)} · ${sh.kind}`), h('span', { class: 'muted grow' }, sh.text.slice(0, 120)),
       slots.length > 1 ? slots.map(s => btn(s === 'video' ? '🎬 Видео' : '🖼 Картинка', () => { cur = s; show(); }, 'chip')) : null,
@@ -870,6 +936,45 @@ async function convAttach(files) {
   render();
 }
 
+// ---- подхват скачанного: для сайтов без API (motion16 и т. п.) мост показывает новые файлы в «Загрузках»
+const WATCH = { since: Date.now(), seen: new Set(), busy: false };
+async function pollDownloads() {
+  if (WATCH.busy || !S.bridgeOk || !S.conv.watch || S.tab !== 'conveyor') return;
+  WATCH.busy = true;
+  try {
+    const r = await fetch('/__downloads?since=' + WATCH.since, { cache: 'no-store' });
+    const j = await r.json();
+    for (const f of (j.files || []).sort((a, b) => a.mtime - b.mtime)) {
+      const key = f.name + '|' + f.size + '|' + f.mtime;
+      if (WATCH.seen.has(key)) continue;
+      const isVideo = /\.(mp4|webm|mov|m4v)$/i.test(f.name);
+      if (isVideo !== (S.conv.mode === 'video')) continue;   // в режиме картинок берём картинки, в режиме видео — видео
+      WATCH.seen.add(key);
+      const blob = await (await fetch('/__download?name=' + encodeURIComponent(f.name), { cache: 'no-store' })).blob();
+      const { cur } = convCurrent();
+      await convAttach([new File([blob], f.name, { type: blob.type || guessType(f.name) })]);
+      if (cur) toast(`Подхвачен «${f.name}» → ${Prompts.code(cur.sc, cur.sh)}`);
+    }
+  } catch (e) { /* мост перезапускается или файл ещё пишется — попробуем через пару секунд */ }
+  WATCH.busy = false;
+}
+setInterval(pollDownloads, 2000);
+
+const convScenes = () => S.conv.scene === 'all' ? S.p.scenes : S.p.scenes.filter(s => s.id === S.conv.scene);
+
+// Картинку в буфер обмена (PNG — его понимают все сайты при вставке Ctrl+V).
+async function copyImage(id) {
+  try {
+    const blob = await DB.getBlob(id);
+    const bmp = await createImageBitmap(blob);
+    const c = h('canvas', { width: bmp.width, height: bmp.height });
+    c.getContext('2d').drawImage(bmp, 0, 0);
+    const png = await new Promise(r => c.toBlob(r, 'image/png'));
+    await navigator.clipboard.write([new ClipboardItem({ 'image/png': png })]);
+    toast('Кадр скопирован — вставьте его на сайте генератора через Ctrl+V');
+  } catch (e) { toast('Не удалось скопировать кадр: ' + e.message + '. Скачайте его кнопкой ⬇.'); }
+}
+
 function renderConveyor() {
   const p = S.p;
   if (!p.scenes.length) return h('div', { class: 'page' }, h('p', { class: 'muted' }, 'Сначала импортируйте сценарий на вкладке «Материалы».'));
@@ -883,6 +988,10 @@ function renderConveyor() {
       h('option', { value: 'all' }, 'Все сцены'), p.scenes.map(s => h('option', { value: s.id, selected: S.conv.scene === s.id }, `Сцена ${s.num}. ${s.heading.split(/\s+[-–—]\s+/)[0]}`))),
     h('span', { class: 'pill' }, left ? `Осталось ${left} из ${q.length}` : `Все ${q.length} готовы ✓`),
     h('span', { class: 'grow' }),
+    h('label', { class: 'check', title: S.bridgeOk ? 'Скачанные с сайта генератора файлы сами попадут в текущий шот' : 'Работает, когда студия открыта через start-studio.bat' },
+      h('input', { type: 'checkbox', checked: !!S.conv.watch && S.bridgeOk, disabled: !S.bridgeOk,
+        onchange: e => { S.conv.watch = e.target.checked; WATCH.since = Date.now() - 1000; saveUi(); render(); } }),
+      '👀 подхватывать скачанное из «Загрузок»'),
     h('label', { class: 'check' }, h('input', { type: 'checkbox', checked: S.conv.autoCopy, onchange: e => { S.conv.autoCopy = e.target.checked; saveUi(); } }), 'копировать промпт при переходе'));
   if (!cur) return h('div', { class: 'page' }, top);
   const { sc, sh } = cur;
@@ -895,7 +1004,7 @@ function renderConveyor() {
   const drop = h('div', { class: 'conv-drop' + (result ? ' done' : '') },
     result ? thumb(result, '') : null,
     h('div', { class: 'conv-drop-hint' },
-      h('b', {}, result ? 'Готово. Можно заменить:' : 'Вставьте результат'),
+      h('b', {}, result ? 'Готово. Можно заменить:' : S.conv.watch && S.bridgeOk ? 'Скачайте результат с сайта — он попадёт сюда сам' : 'Вставьте результат'),
       h('div', {}, 'Ctrl+V из буфера · перетащите файл · ', btn('выбрать файл', async () => convAttach(await pickFile('image/*,video/*,audio/*', true)), 'linkish'))));
   dropzone(drop, convAttach);
 
@@ -916,9 +1025,13 @@ function renderConveyor() {
         h('textarea', { class: 'conv-prompt', rows: 12, readOnly: true, value: convPrompt(cur), onfocus: e => e.target.select() }),
         h('div', { class: 'row wrap' },
           S.conv.mode === 'image' ? btn(genBusy.has(sh.id) ? '🎨 Рисую…' : result ? '🎨 Ещё вариант' : '🎨 Сгенерировать', () => genOne(sc, sh), 'primary big', 'Клавиша G') : null,
-          S.conv.mode === 'image' ? btn(`🎨 Все пустые (${emptyShots(S.conv.scene === 'all' ? p.scenes : p.scenes.filter(s => s.id === S.conv.scene)).length})`,
-            () => genBatch(emptyShots(S.conv.scene === 'all' ? p.scenes : p.scenes.filter(s => s.id === S.conv.scene))), 'big', 'Сгенерировать картинки для всех шотов без картинки') : null,
-          btn('⧉ Скопировать промпт', convCopy, S.conv.mode === 'image' ? 'big' : 'primary big'),
+          S.conv.mode === 'image' ? btn(`🎨 Все пустые (${emptyShots(convScenes()).length})`,
+            () => genBatch(emptyShots(convScenes())), 'big', 'Сгенерировать картинки для всех шотов без картинки') : null,
+          S.conv.mode === 'video' ? videoButton(sc, sh, 'primary big') : null,
+          S.conv.mode === 'video' ? btn(`🎬 Все без видео (${noVideoShots(convScenes()).length})`,
+            () => genBatch(noVideoShots(convScenes()), 'video'), 'big', 'Оживить все кадры без видео через сервис видео из ⚙') : null,
+          btn('⧉ Скопировать промпт', convCopy, 'big'),
+          S.conv.mode === 'video' && sh.assets.image ? btn('⧉ Кадр в буфер', () => copyImage(sh.assets.image), 'big', 'Скопировать кадр шота, чтобы вставить его на сайте генератора (Ctrl+V)') : null,
           btn('✎ Править в раскадровке', () => { S.tab = 'board'; S.sceneId = sc.id; S.focusShot = sh.id; S.filter = 'all'; render(); const el = document.querySelector(`[data-shot="${sh.id}"]`); if (el) el.scrollIntoView({ block: 'center' }); }, 'ghost'))),
       h('div', { class: 'conv-side' },
         drop,
@@ -1084,7 +1197,50 @@ function openSettings() {
   const values = () => ({ mode: mode.value, apiKey: key.value.trim(), baseUrl: base.value.trim(), apiPath: path.value.trim(), apiFormat: fmt.value,
     model: model.value.trim() || 'claude-opus-5-5', effort: effort.value,
     detected: base.value.trim() === AI.settings.baseUrl && fmt.value === AI.settings.apiFormat ? AI.settings.detected : '',
-    image: AI.settings.image });
+    image: AI.settings.image, video: AI.settings.video });
+
+  // ---- видео
+  const vs = AI.videoSettings();
+  const vidProvider = h('select', {}, [['none', 'Нет — вручную через «Конвейер» (любой сайт, например motion16)'], ['same', 'Тот же сервис, что для текста (Sora через /v1/videos)'],
+    ['openai', 'OpenAI Sora (свой ключ)'], ['fal', 'fal.ai — Kling, Wan, Hailuo, Seedance'], ['replicate', 'Replicate — Kling, Wan, Hailuo, Seedance'], ['gemini', 'Google Veo (ключ AIza…)']]
+    .map(([v, l]) => h('option', { value: v, selected: vs.provider === v }, l)));
+  const vidKey = h('input', { type: 'password', value: vs.apiKey, placeholder: 'ключ сервиса видео', autocomplete: 'off' });
+  const vidBase = h('input', { value: vs.baseUrl, placeholder: 'пусто — адрес по умолчанию', autocomplete: 'off', autocapitalize: 'off' });
+  const vidModels = h('datalist', { id: 'cs-vid-models' });
+  const vidModel = h('input', { value: vs.model, list: 'cs-vid-models', autocomplete: 'off' });
+  const vidExtra = h('input', { value: vs.extra, placeholder: '{"negative_prompt": "text, watermark"} — необязательно', autocomplete: 'off' });
+  const vidConc = h('select', {}, [1, 2, 3, 4].map(n => h('option', { value: n, selected: +vs.concurrency === n }, n)));
+  const vidStatus = h('div', { class: 'small' });
+  const vidKeyField = field('Ключ сервиса видео', vidKey), vidBaseField = field('Адрес (необязательно)', vidBase);
+  const vidRest = h('div', {});
+  const onVidProvider = () => {
+    const v = vidProvider.value;
+    vidKeyField.classList.toggle('hidden', v === 'same' || v === 'none');
+    vidBaseField.classList.toggle('hidden', v === 'same' || v === 'none');
+    vidRest.classList.toggle('hidden', v === 'none');
+    const list = AI.VIDEO_MODELS[v] || [];
+    fill(vidModels, ...list.map(m => h('option', { value: m })));
+    vidModel.placeholder = list[0] ? 'например ' + list[0] : '';
+  };
+  vidProvider.addEventListener('change', onVidProvider); onVidProvider();
+  const vidValues = () => ({ provider: vidProvider.value, apiKey: vidKey.value.trim(), baseUrl: vidBase.value.trim(), model: vidModel.value.trim(),
+    extra: vidExtra.value.trim(), concurrency: +vidConc.value });
+  const testVideo = async () => {
+    if (!confirm('Проверка создаст короткое видео (4–5 секунд). У платных сервисов это спишет деньги. Продолжить?')) return;
+    const before = Object.assign({}, AI.settings);
+    AI.save(Object.assign(values(), { video: vidValues() }));
+    fill(vidStatus, h('span', { class: 'muted' }, 'Отправляю задачу…'));
+    try {
+      const t0 = performance.now();
+      const blob = await AI.generateVideo({ prompt: 'A red apple slowly rotating on a dark wooden table, soft side light, cinematic.', seconds: 4, aspect: '16:9',
+        onProgress: t => fill(vidStatus, h('span', { class: 'muted' }, 'Сервис делает видео… ' + t)) });
+      fill(vidStatus, h('div', { class: 'ok' }, `✓ Видео работает: ${(blob.size / 1048576).toFixed(1)} МБ за ${((performance.now() - t0) / 1000).toFixed(0)} с.`),
+        h('video', { src: URL.createObjectURL(blob), controls: true, autoplay: true, muted: true, class: 'test-img' }));
+    } catch (e) {
+      AI.save(before);
+      fill(vidStatus, h('div', { class: 'warn' }, e.message));
+    }
+  };
 
   // ---- картинки
   const is = AI.imageSettings();
@@ -1184,9 +1340,18 @@ function openSettings() {
     h('div', { class: 'row wrap' }, field('Модель', imgModel), imgModels, imgFormatField, field('Одновременно', imgConc)),
     imgStatus,
     h('div', { class: 'row' }, btn('Подобрать автоматически', pickImage, 'primary', 'Перепробовать модели и способы на тестовой картинке и запомнить рабочий'), btn('Проверить картинки', testImage)),
+    h('h4', {}, 'Видео — кнопки 🎬'),
+    field('Сервис', vidProvider),
+    vidKeyField, vidBaseField,
+    vidRest,
+    vidStatus,
     h('div', { class: 'row' }, h('span', { class: 'grow' }),
       btn('Отмена', () => dlg.close(), 'ghost'),
-      btn('Сохранить', () => { AI.save(Object.assign(values(), { image: imgValues() })); dlg.close(); toast('Сохранено'); render(); }, 'primary')));
+      btn('Сохранить', () => { AI.save(Object.assign(values(), { image: imgValues(), video: vidValues() })); dlg.close(); toast('Сохранено'); render(); }, 'primary')));
+  fill(vidRest,
+    h('div', { class: 'row wrap' }, field('Модель', vidModel), vidModels, field('Одновременно', vidConc)),
+    field('Доп. параметры для сервиса (JSON)', vidExtra),
+    h('div', { class: 'row' }, btn('Проверить видео', testVideo)));
   fill(apiBox,
     field('API Key', key), keyHint,
     h('div', { class: 'row wrap' }, field('API Host', base), field('API Path (необязательно)', path)),
@@ -1273,7 +1438,7 @@ window.addEventListener('keydown', e => {
     if (e.key === 'ArrowRight') { e.preventDefault(); convGo(1); }
     else if (e.key === 'ArrowLeft') { e.preventDefault(); convGo(-1); }
     else if (e.key === 'c' || e.key === 'с') convCopy();
-    else if ((e.key === 'g' || e.key === 'п') && S.conv.mode === 'image') { const { cur } = convCurrent(); if (cur) genOne(cur.sc, cur.sh); }
+    else if (e.key === 'g' || e.key === 'п') { const { cur } = convCurrent(); if (cur) genOne(cur.sc, cur.sh, S.conv.mode === 'video' ? 'video' : 'image'); }
   } else if (S.tab === 'board' && (e.key === 'j' || e.key === 'k' || e.key === 'о' || e.key === 'л')) {
     const i = S.p.scenes.findIndex(s => s.id === S.sceneId), d = (e.key === 'j' || e.key === 'о') ? 1 : -1;
     const n = S.p.scenes[i + d];
@@ -1286,6 +1451,7 @@ window.addEventListener('drop', e => { e.preventDefault(); if (e.dataTransfer.fi
 window.addEventListener('beforeunload', () => { flush(); });
 
 (async () => {
+  AI.bridge().then(ok => { S.bridgeOk = ok; if (S.tab === 'conveyor') render(); });
   try { await loadProjects(); } catch (e) { document.body.textContent = 'Не удалось открыть хранилище браузера: ' + e.message; return; }
   render();
 })();

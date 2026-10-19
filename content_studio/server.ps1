@@ -91,10 +91,43 @@ function Send-File($req, $res) {
   Send-Bytes $res 200 $type ([IO.File]::ReadAllBytes($full))
 }
 
+# Папка «Загрузки»: студия подхватывает скачанные с сайтов видео и картинки (для сервисов без API).
+$downloads = Join-Path ([Environment]::GetFolderPath('UserProfile')) 'Downloads'
+$mediaTypes = @{ '.mp4' = 'video/mp4'; '.webm' = 'video/webm'; '.mov' = 'video/quicktime'; '.m4v' = 'video/mp4'; '.png' = 'image/png'; '.jpg' = 'image/jpeg'; '.jpeg' = 'image/jpeg'; '.webp' = 'image/webp' }
+
+function Send-Downloads($req, $res) {
+  $since = 0.0
+  [void][double]::TryParse([string]$req.QueryString['since'], [ref]$since)
+  $files = @()
+  if (Test-Path -LiteralPath $downloads) {
+    foreach ($f in Get-ChildItem -LiteralPath $downloads -File) {
+      if (-not $mediaTypes.ContainsKey($f.Extension.ToLower())) { continue }
+      $ms = ([DateTimeOffset]$f.LastWriteTimeUtc).ToUnixTimeMilliseconds()
+      if ($ms -le $since) { continue }
+      $files += '{"name":' + (ConvertTo-Json $f.Name) + ',"size":' + $f.Length + ',"mtime":' + $ms + '}'
+    }
+  }
+  Send-Json $res 200 ('{"dir":' + (ConvertTo-Json $downloads) + ',"files":[' + ($files -join ',') + ']}')
+}
+
+function Send-Download($req, $res) {
+  $name = [string]$req.QueryString['name']
+  if (-not $name -or $name -match '[\\/]' -or $name.Contains('..')) { return Send-Error $res 400 'bad name' }
+  $full = Join-Path $downloads $name
+  $type = $mediaTypes[[IO.Path]::GetExtension($name).ToLower()]
+  if (-not $type -or -not (Test-Path -LiteralPath $full -PathType Leaf)) { return Send-Error $res 404 'not found' }
+  Send-Bytes $res 200 $type ([IO.File]::ReadAllBytes($full))
+}
+
 function Invoke-Request($ctx) {
   $req = $ctx.Request; $res = $ctx.Response
   $path = $req.Url.AbsolutePath
-  if ($path -eq '/__studio') { return Send-Json $res 200 '{"bridge":true,"version":1}' }
+  if ($path -eq '/__studio') { return Send-Json $res 200 '{"bridge":true,"version":2,"downloads":true}' }
+  if ($path -eq '/__downloads' -or $path -eq '/__download') {
+    $from = $req.Headers['Origin']
+    if ($from -and $from -ne $origin -and $from -ne "http://127.0.0.1:$Port") { return Send-Error $res 403 'forbidden' }
+    if ($path -eq '/__downloads') { return Send-Downloads $req $res } else { return Send-Download $req $res }
+  }
   if ($path -eq '/proxy') {
     # Чужие сайты в браузере не должны пользоваться мостом.
     $from = $req.Headers['Origin']

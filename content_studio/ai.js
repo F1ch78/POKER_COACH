@@ -459,6 +459,194 @@ const AI = (() => {
     throw new Error('Ни один вариант не сработал. Похоже, ваш сервис не умеет рисовать картинки — выберите в «Сервис» Google Gemini или другой сервис картинок.');
   }
 
+  // ---------------------------------------------------------------- видео
+  // Видео рисуется долго (минуты), поэтому везде одна схема: создать задачу → опрашивать → скачать mp4.
+  // openai — /v1/videos (Sora; так же отвечают и шлюзы); fal — очередь fal.ai; replicate — predictions;
+  // gemini — Veo через predictLongRunning.
+  const VID_DEFAULTS = { provider: 'none', apiKey: '', baseUrl: '', model: '', extra: '', concurrency: 1 };
+  const videoSettings = () => Object.assign({}, VID_DEFAULTS, settings.video || {});
+  const VIDEO_MODELS = {
+    same: ['sora-2', 'sora-2-pro'],
+    openai: ['sora-2', 'sora-2-pro'],
+    fal: ['fal-ai/kling-video/v2.1/standard/image-to-video', 'fal-ai/wan/v2.2-a14b/image-to-video', 'fal-ai/minimax/hailuo-02/standard/image-to-video', 'fal-ai/bytedance/seedance/v1/lite/image-to-video'],
+    replicate: ['kwaivgi/kling-v2.1', 'wan-video/wan-2.2-i2v-fast', 'minimax/hailuo-02', 'bytedance/seedance-1-lite'],
+    gemini: ['veo-3.0-fast-generate-001', 'veo-3.0-generate-001'],
+  };
+
+  function vidCfg() {
+    const c = videoSettings();
+    const trim = u => (u || '').trim().replace(/\/+$/, '');
+    const base = { provider: c.provider, key: c.apiKey.trim(), model: c.model.trim(), extra: c.extra };
+    if (c.provider === 'same') return Object.assign(base, { provider: 'openai', key: settings.apiKey.trim(), root: root(), model: base.model || 'sora-2' });
+    if (c.provider === 'openai') return Object.assign(base, { root: trim(c.baseUrl).replace(/\/v1$/, '') || 'https://api.openai.com', model: base.model || 'sora-2' });
+    if (c.provider === 'fal') return Object.assign(base, { root: trim(c.baseUrl) || 'https://queue.fal.run' });
+    if (c.provider === 'replicate') return Object.assign(base, { root: trim(c.baseUrl) || 'https://api.replicate.com' });
+    if (c.provider === 'gemini') return Object.assign(base, { root: trim(c.baseUrl) || 'https://generativelanguage.googleapis.com', model: base.model || 'veo-3.0-fast-generate-001' });
+    return base;
+  }
+
+  const sleep = ms => new Promise(r => setTimeout(r, ms));
+  const nearest = (v, list) => list.reduce((a, b) => Math.abs(b - v) < Math.abs(a - v) ? b : a);
+
+  async function getJson(url, hdrs) {
+    let r;
+    try { r = await request(url, { method: 'GET', headers: hdrs || {} }); }
+    catch (e) { const err = new Error('Нет связи с ' + url.replace(/^https?:\/\//, '').split('/')[0]); err.network = true; throw err; }
+    const text = await r.text();
+    let j = null;
+    try { j = JSON.parse(text); } catch (e) {}
+    if (!r.ok) {
+      const m = j && (j.error ? (j.error.message || j.error) : j.detail) || text.slice(0, 300);
+      const err = new Error(explain(r.status, typeof m === 'string' ? m : JSON.stringify(m))); err.status = r.status; err.raw = String(m);
+      throw err;
+    }
+    return j || {};
+  }
+
+  async function download(url, hdrs) {
+    const r = await request(url, { method: 'GET', headers: hdrs || {} });
+    if (!r.ok) throw new Error('Не удалось скачать видео (' + r.status + ').');
+    const b = await r.blob();
+    return b.type && b.type !== 'application/octet-stream' ? b : new Blob([b], { type: 'video/mp4' });
+  }
+
+  // Ищем ссылку на ролик в ответе любого формата.
+  function findVideoUrl(o) {
+    if (!o) return null;
+    if (typeof o === 'string') return /^https?:\/\//.test(o) ? o : null;
+    if (Array.isArray(o)) { for (const x of o) { const u = findVideoUrl(x); if (u) return u; } return null; }
+    if (typeof o === 'object') {
+      for (const k of ['video', 'videos', 'generatedSamples', 'samples', 'url', 'uri', 'output', 'download_url', 'file', 'data', 'result']) { const u = findVideoUrl(o[k]); if (u) return u; }
+    }
+    return null;
+  }
+
+  function extraParams(c) {
+    if (!c.extra || !c.extra.trim()) return {};
+    try { return JSON.parse(c.extra); } catch (e) { throw new Error('«Доп. параметры» видео — не JSON: ' + e.message); }
+  }
+
+  // Ожидание готовности: check() возвращает { done, url?, blob?, progress?, error? }.
+  async function waitJob(check, onProgress, shouldStop) {
+    const t0 = Date.now();
+    for (let i = 0; ; i++) {
+      if (shouldStop && shouldStop()) throw new Error('Остановлено');
+      const st = await check();
+      if (st.error) throw new Error('Сервис не смог сделать видео: ' + st.error);
+      if (st.done) return st;
+      const min = Math.floor((Date.now() - t0) / 60000), sec = Math.floor((Date.now() - t0) / 1000) % 60;
+      onProgress((st.progress != null ? Math.round(st.progress) + '% · ' : '') + `${min}:${String(sec).padStart(2, '0')}`);
+      if (Date.now() - t0 > 30 * 60000) throw new Error('Видео не готово за 30 минут — сервис, видимо, завис.');
+      await sleep(i < 6 ? 5000 : 10000);
+    }
+  }
+
+  // Sora ждёт кадр ровно в размере видео: подгоняем с обрезкой по центру.
+  async function fitFrame(blob, w, h) {
+    const bmp = await createImageBitmap(blob);
+    const cv = document.createElement('canvas'); cv.width = w; cv.height = h;
+    const k = Math.max(w / bmp.width, h / bmp.height);
+    cv.getContext('2d').drawImage(bmp, (w - bmp.width * k) / 2, (h - bmp.height * k) / 2, bmp.width * k, bmp.height * k);
+    return new Promise(r => cv.toBlob(r, 'image/jpeg', 0.92));
+  }
+
+  async function vidOpenAI(c, o) {
+    const size = o.aspect === '9:16' ? '720x1280' : '1280x720';
+    const fd = new FormData();
+    fd.append('model', c.model);
+    fd.append('prompt', o.prompt);
+    fd.append('seconds', String(nearest(o.seconds, [4, 8, 12])));
+    fd.append('size', size);
+    if (o.image) { const [w, h] = size.split('x').map(Number); fd.append('input_reference', await fitFrame(o.image.blob, w, h), 'frame.jpg'); }
+    for (const [k, v] of Object.entries(extraParams(c))) fd.set(k, String(v));
+    let r;
+    try { r = await request(c.root + '/v1/videos', { method: 'POST', headers: bearer(c), body: fd }); }
+    catch (e) { const err = new Error('Нет связи с сервисом видео.'); err.network = true; throw err; }
+    const text = await r.text();
+    let job = null;
+    try { job = JSON.parse(text); } catch (e) {}
+    if (!r.ok) {
+      const m = job && job.error ? (job.error.message || JSON.stringify(job.error)) : text.slice(0, 300);
+      const err = new Error(explain(r.status, m)); err.status = r.status; err.raw = m; throw err;
+    }
+    if (!job || !job.id) throw new Error('Сервис не вернул номер задачи: ' + text.slice(0, 150));
+    await waitJob(async () => {
+      const j = await getJson(`${c.root}/v1/videos/${job.id}`, bearer(c));
+      if (j.status === 'failed') return { error: (j.error && (j.error.message || j.error.code)) || 'failed' };
+      return { done: j.status === 'completed', progress: j.progress };
+    }, o.onProgress, o.shouldStop);
+    return download(`${c.root}/v1/videos/${job.id}/content`, bearer(c));
+  }
+
+  async function vidFal(c, o) {
+    const hd = { authorization: 'Key ' + c.key };
+    const input = Object.assign({ prompt: o.prompt, aspect_ratio: o.aspect, duration: String(nearest(o.seconds, [5, 10])) },
+      o.image ? { image_url: `data:${o.image.mime};base64,${o.image.b64}` } : {}, extraParams(c));
+    const sub = await postJson(`${c.root}/${c.model}`, hd, input);
+    const id = sub.request_id;
+    const statusUrl = sub.status_url || `${c.root}/${c.model}/requests/${id}/status`;
+    const resultUrl = sub.response_url || `${c.root}/${c.model}/requests/${id}`;
+    await waitJob(async () => {
+      const j = await getJson(statusUrl, hd);
+      if (/FAIL|ERROR/i.test(j.status || '')) return { error: j.error || j.status };
+      return { done: j.status === 'COMPLETED', progress: null };
+    }, o.onProgress, o.shouldStop);
+    const res = await getJson(resultUrl, hd);
+    const url = findVideoUrl(res);
+    if (!url) throw new Error('В ответе нет ссылки на видео: ' + JSON.stringify(res).slice(0, 150));
+    return download(url);
+  }
+
+  async function vidReplicate(c, o) {
+    const imgKey = /kling/i.test(c.model) ? 'start_image' : /minimax|hailuo/i.test(c.model) ? 'first_frame_image' : 'image';
+    const input = Object.assign({ prompt: o.prompt, duration: nearest(o.seconds, [5, 10]), aspect_ratio: o.aspect },
+      o.image ? { [imgKey]: `data:${o.image.mime};base64,${o.image.b64}` } : {}, extraParams(c));
+    const versioned = c.model.includes(':');
+    const job = await postJson(versioned ? `${c.root}/v1/predictions` : `${c.root}/v1/models/${c.model}/predictions`, bearer(c),
+      versioned ? { version: c.model.split(':')[1], input } : { input });
+    const getUrl = (job.urls && job.urls.get) || `${c.root}/v1/predictions/${job.id}`;
+    let out = null;
+    await waitJob(async () => {
+      const j = await getJson(getUrl, bearer(c));
+      if (j.status === 'failed' || j.status === 'canceled') return { error: j.error || j.status };
+      if (j.status === 'succeeded') { out = j.output; return { done: true }; }
+      return { done: false };
+    }, o.onProgress, o.shouldStop);
+    const url = findVideoUrl(out);
+    if (!url) throw new Error('В ответе нет ссылки на видео.');
+    return download(url);
+  }
+
+  async function vidVeo(c, o) {
+    const hd = { 'x-goog-api-key': c.key };
+    const inst = { prompt: o.prompt };
+    if (o.image) inst.image = { bytesBase64Encoded: o.image.b64, mimeType: o.image.mime };
+    const op = await postJson(`${c.root}/v1beta/models/${c.model.replace(/^models\//, '')}:predictLongRunning`, hd,
+      { instances: [inst], parameters: Object.assign({ aspectRatio: o.aspect }, extraParams(c)) });
+    let res = null;
+    await waitJob(async () => {
+      const j = await getJson(`${c.root}/v1beta/${op.name}`, hd);
+      if (j.error) return { error: j.error.message || JSON.stringify(j.error) };
+      if (j.done) { res = j.response; return { done: true }; }
+      return { done: false };
+    }, o.onProgress, o.shouldStop);
+    const url = findVideoUrl(res && (res.generateVideoResponse || res));
+    if (!url) throw new Error('Сервис не вернул видео' + (res && res.generateVideoResponse && res.generateVideoResponse.raiMediaFilteredReasons ? ': ' + res.generateVideoResponse.raiMediaFilteredReasons.join('; ') : '.'));
+    return download(url, hd);
+  }
+
+  // { prompt, image?: { blob, mime, b64 }, seconds, aspect, onProgress, shouldStop } → Blob (mp4)
+  async function generateVideo(o) {
+    const c = vidCfg();
+    if (!c.provider || c.provider === 'none') throw new Error('Выберите сервис видео в ⚙ → «Видео».');
+    if (!c.key) throw new Error('Укажите ключ сервиса видео в ⚙ → «Видео».');
+    if (!c.model) throw new Error('Укажите модель видео в ⚙ → «Видео».');
+    if (c.provider === 'replicate' && !(await bridge())) throw new Error('Replicate работает только через мост: откройте студию через start-studio.bat.');
+    o = Object.assign({ seconds: 5, aspect: '16:9', onProgress: () => {} }, o);
+    const fn = { openai: vidOpenAI, fal: vidFal, replicate: vidReplicate, gemini: vidVeo }[c.provider];
+    return fn(c, o);
+  }
+
   const VISUAL_RULES = `Rules for every description:
 - English, present tense, concrete and visual: who is in frame, what they do, what is around them.
 - Never use personal names or place names; describe people by appearance cue ("the man in the black cloak", "the elf woman with the scarlet ponytail", "the small elf girl").
@@ -495,5 +683,5 @@ const AI = (() => {
   }
 
   return { get settings() { return settings; }, save, known, call, ping, models, describeScene, locationSet, characterTags, setManual: fn => { manual = fn; }, bridge,
-    imageSettings, generateImage, imageModels, autoPickImage, imageNeedsModel: () => { const c = imgCfg(); return c.format === 'gemini' || formatOrder(c)[0] !== 'responses'; } };
+    imageSettings, generateImage, imageModels, autoPickImage, videoSettings, generateVideo, VIDEO_MODELS, imageNeedsModel: () => { const c = imgCfg(); return c.format === 'gemini' || formatOrder(c)[0] !== 'responses'; } };
 })();
