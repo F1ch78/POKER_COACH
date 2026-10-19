@@ -119,10 +119,100 @@ function Send-Download($req, $res) {
   Send-Bytes $res 200 $type ([IO.File]::ReadAllBytes($full))
 }
 
+# Озвучка: Piper (piper.exe) и голоса качаются при первом использовании в папку tts рядом со студией.
+$ttsDir = Join-Path $root 'tts'
+$voiceDir = Join-Path $ttsDir 'voices'
+$piperExe = Join-Path $ttsDir 'piper\piper.exe'
+$piperZip = 'https://github.com/rhasspy/piper/releases/download/2023.11.14-2/piper_windows_amd64.zip'
+$voiceHosts = @('https://huggingface.co', 'https://hf-mirror.com')
+
+function Save-Url([string]$url, [string]$file) {
+  Write-Host "  ↓ $url" -ForegroundColor Cyan
+  $part = $file + '.part'
+  (New-Object Net.WebClient).DownloadFile($url, $part)
+  Move-Item -LiteralPath $part -Destination $file -Force
+}
+
+function Install-Piper {
+  if (Test-Path -LiteralPath $piperExe) { return }
+  Write-Host '  Озвучка: скачиваю Piper (один раз)…' -ForegroundColor Cyan
+  $null = New-Item -ItemType Directory -Force -Path $ttsDir
+  $zip = Join-Path $ttsDir 'piper.zip'
+  try { Save-Url $piperZip $zip } catch { throw "Не удалось скачать Piper с github.com: $($_.Exception.GetBaseException().Message)" }
+  Expand-Archive -LiteralPath $zip -DestinationPath $ttsDir -Force
+  Remove-Item -LiteralPath $zip -Force
+  if (-not (Test-Path -LiteralPath $piperExe)) { throw 'В архиве Piper нет piper.exe' }
+}
+
+# ru_RU-irina-medium → voices\ru_RU-irina-medium.onnx (+ .onnx.json)
+function Install-Voice([string]$name) {
+  if ($name -notmatch '^(([a-z]{2})_[A-Z]{2})-([a-z0-9_]+)-(x_low|low|medium|high)$') { throw "Неизвестный голос: $name" }
+  $model = Join-Path $voiceDir "$name.onnx"
+  if ((Test-Path -LiteralPath $model) -and (Test-Path -LiteralPath "$model.json")) { return $model }
+  Write-Host "  Озвучка: скачиваю голос $name (один раз)…" -ForegroundColor Cyan
+  $null = New-Item -ItemType Directory -Force -Path $voiceDir
+  $rel = "/rhasspy/piper-voices/resolve/v1.0.0/$($Matches[2])/$($Matches[1])/$($Matches[3])/$($Matches[4])/$name.onnx"
+  $why = ''
+  foreach ($h in $voiceHosts) {
+    try { Save-Url "$h$rel.json" "$model.json"; Save-Url "$h$rel" $model; return $model }
+    catch { $why = $_.Exception.GetBaseException().Message; Write-Host "  ✗ $h`: $why" -ForegroundColor Yellow }
+  }
+  Remove-Item -LiteralPath "$model.json" -Force -ErrorAction SilentlyContinue
+  throw "Не удалось скачать голос $name`: $why"
+}
+
+function Send-TtsStatus($res) {
+  $voices = @()
+  if (Test-Path -LiteralPath $voiceDir) { $voices = @(Get-ChildItem -LiteralPath $voiceDir -Filter '*.onnx' | ForEach-Object { ConvertTo-Json $_.BaseName }) }
+  $piper = $(if (Test-Path -LiteralPath $piperExe) { 'true' } else { 'false' })
+  Send-Json $res 200 ('{"piper":' + $piper + ',"voices":[' + ($voices -join ',') + ']}')
+}
+
+# POST {text, voice, speed} → WAV
+function Send-Speech($req, $res) {
+  $q = [Text.Encoding]::UTF8.GetString((Read-Body $req.InputStream)) | ConvertFrom-Json
+  $text = ([string]$q.text -replace '\s+', ' ').Trim()
+  if (-not $text) { return Send-Error $res 400 'Пустой текст' }
+  $speed = [double]$q.speed
+  if ($speed -lt 0.5 -or $speed -gt 2) { $speed = 1 }
+  Install-Piper
+  $model = Install-Voice ([string]$q.voice)
+  $out = Join-Path ([IO.Path]::GetTempPath()) ("studio-tts-" + [Guid]::NewGuid().ToString('N') + '.wav')
+  $psi = New-Object Diagnostics.ProcessStartInfo
+  $psi.FileName = $piperExe
+  $psi.WorkingDirectory = Split-Path -Parent $piperExe
+  $psi.Arguments = '--model "{0}" --output_file "{1}" --length_scale {2}' -f $model, $out, (1 / $speed).ToString('0.###', [Globalization.CultureInfo]::InvariantCulture)
+  $psi.UseShellExecute = $false
+  $psi.CreateNoWindow = $true
+  $psi.RedirectStandardInput = $true
+  $psi.RedirectStandardError = $true
+  $started = Get-Date
+  $p = [Diagnostics.Process]::Start($psi)
+  # Текст пишем байтами UTF-8: кодировка консоли Windows испортила бы кириллицу.
+  $bytes = [Text.Encoding]::UTF8.GetBytes($text + "`n")
+  $p.StandardInput.BaseStream.Write($bytes, 0, $bytes.Length)
+  $p.StandardInput.BaseStream.Close()
+  $log = $p.StandardError.ReadToEnd()
+  $p.WaitForExit()
+  try {
+    if ($p.ExitCode -ne 0 -or -not (Test-Path -LiteralPath $out)) {
+      $last = ($log -split "`n" | Where-Object { $_.Trim() } | Select-Object -Last 1)
+      throw "Piper завершился с ошибкой $($p.ExitCode): $last"
+    }
+    Write-Host ("  озвучка {0}: «{1}» за {2:N1} с" -f $q.voice, $(if ($text.Length -gt 50) { $text.Substring(0, 50) + '…' } else { $text }), ((Get-Date) - $started).TotalSeconds) -ForegroundColor Green
+    Send-Bytes $res 200 'audio/wav' ([IO.File]::ReadAllBytes($out))
+  } finally { Remove-Item -LiteralPath $out -Force -ErrorAction SilentlyContinue }
+}
+
 function Invoke-Request($ctx) {
   $req = $ctx.Request; $res = $ctx.Response
   $path = $req.Url.AbsolutePath
-  if ($path -eq '/__studio') { return Send-Json $res 200 '{"bridge":true,"version":2,"downloads":true}' }
+  if ($path -eq '/__studio') { return Send-Json $res 200 '{"bridge":true,"version":3,"downloads":true,"tts":true}' }
+  if ($path -eq '/__tts') {
+    $from = $req.Headers['Origin']
+    if ($from -and $from -ne $origin -and $from -ne "http://127.0.0.1:$Port") { return Send-Error $res 403 'forbidden' }
+    if ($req.HttpMethod -eq 'POST') { return Send-Speech $req $res } else { return Send-TtsStatus $res }
+  }
   if ($path -eq '/__downloads' -or $path -eq '/__download') {
     $from = $req.Headers['Origin']
     if ($from -and $from -ne $origin -and $from -ne "http://127.0.0.1:$Port") { return Send-Error $res 403 'forbidden' }

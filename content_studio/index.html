@@ -82,6 +82,11 @@
   .meter { display: flex; flex-direction: column; gap: 3px; margin-top: 8px; font-size: 13px; }
   .meter i, .bar { display: block; height: 5px; background: var(--panel2); border-radius: 3px; overflow: hidden; }
   .meter i b, .bar b { display: block; height: 100%; background: var(--gold); }
+  .vo-scene { margin-top: 14px; }
+  .vo-row { display: grid; grid-template-columns: 80px 1fr auto; gap: 10px; align-items: center; padding: 8px 0; border-top: 1px solid var(--line); }
+  .vo-row audio { height: 30px; max-width: 220px; }
+  .vo-cast .row { display: grid; grid-template-columns: 1fr auto auto auto; align-items: center; margin: 6px 0; }
+  @media (max-width: 760px) { .vo-row, .vo-cast .row { grid-template-columns: 1fr; } }
   .chip { font-size: 13px; padding: 3px 9px; border-radius: 999px; }
   .chip.on { background: #2b2414; border-color: var(--gold); color: var(--gold); }
   .chip.warnchip { border-color: #6b5222; }
@@ -194,6 +199,7 @@
 <script src="prompts.js"></script>
 <script src="render.js"></script>
 <script src="ai.js"></script>
+<script src="voice.js"></script>
 <script src="studio.js"></script>
 <script>if ('serviceWorker' in navigator && location.protocol === 'https:') navigator.serviceWorker.register('sw.js').catch(() => {});</script>
 </body>

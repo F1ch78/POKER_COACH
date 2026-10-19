@@ -369,7 +369,7 @@ function stats() {
 function renderHeader() {
   const sel = h('select', { onchange: e => selectProject(e.target.value) },
     S.list.map(p => h('option', { value: p.id, selected: p.id === S.p.id }, p.name)));
-  const tabs = [['library', '1 · Материалы'], ['board', '2 · Раскадровка'], ['conveyor', '3 · Конвейер'], ['edit', '4 · Монтаж']];
+  const tabs = [['library', '1 · Материалы'], ['board', '2 · Раскадровка'], ['conveyor', '3 · Конвейер'], ['voice', '4 · Озвучка'], ['edit', '5 · Монтаж']];
   const st = stats();
   return h('header', {},
     h('div', { class: 'brand' }, h('span', { class: 'sun' }), 'Студия'),
@@ -1060,6 +1060,182 @@ function renderConveyor() {
           onclick: () => { S.conv.shotId = x.sh.id; render(); if (S.conv.autoCopy) convCopy(); } }, Prompts.code(x.sc, x.sh)))))));
 }
 
+// ---------------------------------------------------------------- вкладка «Озвучка»
+// Реплики шота озвучиваются голосом говорящего и склеиваются в звук шота; закадровый текст — в звук сцены.
+const VO = { running: false, stop: false, done: 0, total: 0, now: '', errors: [], engine: undefined, busy: new Set() };
+const NARRATOR = 'РАССКАЗЧИК';
+
+function voiceConf() {
+  const v = S.p.voice || (S.p.voice = {});
+  if (!v.cast) v.cast = {};
+  if (v.pause == null) v.pause = 0.35;
+  if (v.fit == null) v.fit = true;
+  return v;
+}
+const voiceOf = who => { const v = voiceConf().cast[who] || {}; return { voice: v.voice || Voice.DEFAULT, speed: +v.speed || 1 }; };
+
+// Говорящие по числу реплик; рассказчик — если в сценах есть закадровый текст.
+function voiceSpeakers() {
+  const cnt = new Map();
+  for (const sc of S.p.scenes) {
+    const n = voiceLines(sc, null).length;
+    if (n) cnt.set(NARRATOR, (cnt.get(NARRATOR) || 0) + n);
+    for (const l of sc.shots.flatMap(sh => voiceLines(sc, sh))) cnt.set(l.who, (cnt.get(l.who) || 0) + 1);
+  }
+  return [...cnt.entries()].sort((a, b) => b[1] - a[1]);
+}
+
+// sh = null — закадровый текст сцены.
+const voiceLines = (sc, sh) => sh ? sh.dialogue.map(d => ({ who: d.who, text: Voice.clean(d.line) })).filter(l => l.text)
+  : (sc.narration || []).map(t => ({ who: NARRATOR, text: Voice.clean(t) })).filter(l => l.text);
+// Отпечаток текста и голосов: изменился — озвучка устарела.
+const voiceKey = lines => JSON.stringify([lines, lines.map(l => voiceOf(l.who)), voiceConf().pause]);
+const voiceLabel = (sc, sh) => sh ? Prompts.code(sc, sh) : `Сцена ${sc.num}, рассказчик`;
+
+function voiceState(sc, sh) {
+  const id = (sh || sc).assets.audio, meta = id && S.p.assets[id];
+  const lines = voiceLines(sc, sh);
+  if (!meta) return { lines, state: 'none' };
+  if (!meta.tts) return { lines, state: 'own', meta };
+  return { lines, state: meta.tts === voiceKey(lines) ? 'ok' : 'stale', meta };
+}
+
+async function voiceOne(sc, sh) {
+  const lines = voiceLines(sc, sh);
+  if (!lines.length) throw new Error('нет текста');
+  const blobs = [];
+  for (const l of lines) { const v = voiceOf(l.who); blobs.push(await Voice.speak(l.text, v.voice, v.speed)); }
+  const { blob, duration } = await Voice.join(blobs, voiceConf().pause);
+  const name = (sh ? Prompts.code(sc, sh) : 'S' + String(sc.num).padStart(2, '0') + '_narration') + '_voice.wav';
+  const id = await setAsset(sh || sc, 'audio', new File([blob], name, { type: 'audio/wav' }));
+  S.p.assets[id].tts = voiceKey(lines);
+  if (sh && voiceConf().fit && duration + 0.3 > sh.dur) { sh.dur = Math.ceil((duration + 0.3) * 10) / 10; sh.pinnedDur = true; }
+  touch();
+  return duration;
+}
+
+function voiceItems(scenes, redo) {
+  const want = s => s.lines.length && (s.state === 'none' || (redo && s.state === 'stale'));
+  return scenes.flatMap(sc => [null, ...sc.shots].filter(sh => want(voiceState(sc, sh))).map(sh => ({ sc, sh })));
+}
+
+async function voiceBatch(items) {
+  if (VO.running) return;
+  if (!items.length) return toast('Нечего озвучивать');
+  Object.assign(VO, { running: true, stop: false, done: 0, total: items.length, errors: [] });
+  render();
+  for (const it of items) {
+    if (VO.stop) break;
+    VO.now = voiceLabel(it.sc, it.sh); renderSoon();
+    try { await voiceOne(it.sc, it.sh); }
+    catch (e) {
+      VO.errors.push(VO.now + ': ' + e.message);
+      if (e instanceof TypeError || /мост|скачать/i.test(e.message)) break;   // мост закрыт или голос не скачался
+    }
+    VO.done++;
+  }
+  Object.assign(VO, { running: false, now: '', engine: undefined });
+  toast(VO.errors.length ? `Озвучка: ошибок ${VO.errors.length}` : `Озвучено: ${VO.done}`);
+  render();
+}
+
+async function voiceClick(sc, sh) {
+  const key = (sh || sc).id, label = voiceLabel(sc, sh);
+  if (VO.running || VO.busy.has(key)) return;
+  const st = voiceState(sc, sh);
+  if (st.state === 'own' && !confirm(`${label}: заменить загруженный звук «${st.meta.name}» озвучкой?`)) return;
+  VO.busy.add(key); render();
+  try { toast(`${label}: озвучено, ${await voiceOne(sc, sh)} с`); } catch (e) { toast(label + ': ' + e.message); }
+  VO.busy.delete(key); VO.engine = undefined; render();
+}
+
+let tryAudio = null;
+async function voiceTry(who, b) {
+  const v = voiceOf(who);
+  const first = S.p.scenes.flatMap(sc => [null, ...sc.shots].flatMap(sh => voiceLines(sc, sh))).find(l => l.who === who);
+  b.disabled = true; b.textContent = '…';
+  try {
+    const blob = await Voice.speak(first ? first.text.slice(0, 200) : 'Здравствуйте! Так звучит этот голос.', v.voice, v.speed);
+    if (tryAudio) { tryAudio.pause(); URL.revokeObjectURL(tryAudio.src); }
+    tryAudio = new Audio(URL.createObjectURL(blob));
+    tryAudio.play();
+  } catch (e) { toast(e.message); }
+  b.disabled = false; b.textContent = '▶ Проба'; VO.engine = undefined;
+}
+
+function voiceEngineCard() {
+  const e = VO.engine;
+  if (e === undefined) { VO.engine = 'wait'; Voice.status().then(s => { VO.engine = s || false; if (S.tab === 'voice') render(); }); }
+  if (e === undefined || e === 'wait') return h('div', { class: 'card muted' }, 'Проверяю мост…');
+  if (!e) return h('div', { class: 'card warn' },
+    h('b', {}, 'Озвучка работает, когда студия открыта через start-studio.bat. '),
+    'Голоса синтезирует программа Piper на этом компьютере, а запускает её мост. Сейчас студия открыта без моста. ',
+    'Без моста звук можно загрузить вручную: кнопка «🔊 +» у шота в раскадровке.');
+  if (e.old) return h('div', { class: 'card warn' }, h('b', {}, 'Мост запущен старой версией. '), 'Закройте его чёрное окно и снова запустите start-studio.bat.');
+  return h('div', { class: 'card' },
+    h('h3', {}, 'Движок: Piper, русские голоса'),
+    e.piper ? h('div', { class: 'muted small' }, `✓ Piper установлен · скачано голосов: ${(e.voices || []).length} из ${Voice.VOICES.length}`)
+      : h('div', { class: 'muted small' }, 'При первой озвучке мост скачает Piper (около 22 МБ) и выбранный голос (около 60 МБ) в папку content_studio\\tts. Это делается один раз, ход загрузки виден в окне моста.'));
+}
+
+function renderVoice() {
+  const p = S.p, conf = voiceConf();
+  if (!p.scenes.length) return h('div', { class: 'page' }, h('p', { class: 'muted' }, 'Сцен нет. Импортируйте сценарий на вкладке «Материалы».'));
+  const ready = VO.engine && VO.engine !== 'wait' && !VO.engine.old;
+  const todo = voiceItems(p.scenes, false), stale = voiceItems(p.scenes, true).length - todo.length;
+  const setCast = (who, k, v) => { conf.cast[who] = Object.assign(voiceOf(who), conf.cast[who], { [k]: v }); touch(); render(); };
+  const speakers = voiceSpeakers();
+
+  const rowOf = (sc, sh) => {
+    const st = voiceState(sc, sh), key = (sh || sc).id, busyNow = VO.busy.has(key) || (VO.running && VO.now === voiceLabel(sc, sh));
+    const audio = st.meta ? h('audio', { controls: true, preload: 'none' }) : null;
+    if (audio) assetUrl((sh || sc).assets.audio).then(u => { audio.src = u; });
+    const chip = { none: h('span', { class: 'chip' }, 'не озвучено'), ok: h('span', { class: 'chip on' }, `✓ ${st.meta && st.meta.duration || ''} с`),
+      stale: h('span', { class: 'chip warnchip', title: 'Текст или голос изменились после озвучки' }, '⚠ устарела'), own: h('span', { class: 'chip', title: st.meta && st.meta.name }, '🔊 свой звук') }[st.state];
+    const over = sh ? st.meta && st.meta.duration > sh.dur : st.meta && st.meta.duration > sc.shots.reduce((a, x) => a + (+x.dur || 0), 0);
+    return h('div', { class: 'vo-row' },
+      h('b', { class: 'vo-code' }, sh ? Prompts.code(sc, sh) : 'за кадром'),
+      h('div', { class: 'vo-lines' }, st.lines.map(l => h('div', {}, h('span', { class: 'muted' }, l.who + ': '), l.text)),
+        over ? h('div', { class: 'small', style: 'color:var(--gold)' }, sh ? 'Звук длиннее шота' : 'Звук длиннее сцены') : null),
+      h('div', { class: 'row wrap vo-act' }, chip, audio,
+        btn(busyNow ? '🎙 …' : st.state === 'none' ? '🎙 Озвучить' : '↻ Заново', () => voiceClick(sc, sh), 'chip gen', ready ? '' : 'Нужен мост: start-studio.bat'),
+        st.meta && st.meta.tts ? btn('✕', () => { const id = (sh || sc).assets.audio; delete (sh || sc).assets.audio; dropAsset(id); touch(); render(); }, 'ghost small', 'Убрать озвучку') : null));
+  };
+
+  return h('div', { class: 'page voice' },
+    voiceEngineCard(),
+    h('div', { class: 'grid2', style: 'margin-top:14px' },
+      h('div', { class: 'card' },
+        h('h3', {}, 'Голоса героев'),
+        speakers.length ? h('div', { class: 'vo-cast' }, speakers.map(([who, n]) => {
+          const v = voiceOf(who);
+          return h('div', { class: 'row wrap' },
+            h('span', { class: 'vo-who' }, who === NARRATOR ? 'Рассказчик (закадровый текст)' : who, h('small', { class: 'muted' }, ` · ${n}`)),
+            h('select', { onchange: e => setCast(who, 'voice', e.target.value) }, Voice.VOICES.map(x => h('option', { value: x.id, selected: x.id === v.voice }, x.label))),
+            h('select', { title: 'Скорость речи', onchange: e => setCast(who, 'speed', +e.target.value) },
+              [0.8, 0.9, 1, 1.1, 1.2, 1.3].map(s => h('option', { value: s, selected: s === v.speed }, s === 1 ? 'обычно' : (s < 1 ? 'медленнее ×' : 'быстрее ×') + s))),
+            btn('▶ Проба', e => voiceTry(who, e.currentTarget), 'ghost small', 'Прочитать первую реплику этим голосом'));
+        })) : h('p', { class: 'muted' }, 'В сценарии нет реплик. Реплики пишутся так: ГЕРОЙ: текст.')),
+      h('div', { class: 'card' },
+        h('h3', {}, 'Озвучка фильма'),
+        h('div', { class: 'row wrap' },
+          field('Пауза между репликами, с', input(conf.pause, v => { conf.pause = Math.max(0, Math.min(3, +String(v).replace(',', '.') || 0)); render(); }, '', 'number')),
+          h('label', { class: 'check' }, h('input', { type: 'checkbox', checked: conf.fit, onchange: e => { conf.fit = e.target.checked; touch(); } }), 'Удлинять шот, если реплика не помещается')),
+        h('div', { class: 'row wrap' },
+          VO.running ? btn(VO.stop ? 'Останавливаю…' : 'Остановить', () => { VO.stop = true; render(); }, 'ghost')
+            : btn(`🎙 Озвучить всё, что без звука (${todo.length})`, () => voiceBatch(todo), 'primary'),
+          !VO.running && stale ? btn(`↻ Переозвучить изменённые (${stale})`, () => voiceBatch(voiceItems(p.scenes, true).filter(x => voiceState(x.sc, x.sh).state === 'stale'))) : null),
+        VO.running || VO.errors.length ? h('div', { class: 'row' },
+          h('span', {}, VO.running ? `${VO.done} из ${VO.total}` + (VO.now ? ` · сейчас ${VO.now}` : '') : `Готово ${VO.done - VO.errors.length} из ${VO.total}`),
+          h('i', { class: 'bar grow' }, h('b', { style: `width:${VO.total ? 100 * VO.done / VO.total : 0}%` }))) : null,
+        VO.errors.length ? h('details', {}, h('summary', {}, `ошибок: ${VO.errors.length}`), h('div', { class: 'small' }, VO.errors.map(e => h('div', {}, e)))) : null,
+        h('p', { class: 'muted small' }, 'Озвучка шота ложится в его звук (🔊) и играет в «Монтаже» и в записанном видео. Звук, загруженный вручную, не заменяется без спроса.'))),
+    p.scenes.map(sc => {
+      const rows = [null, ...sc.shots].filter(sh => voiceLines(sc, sh).length).map(sh => rowOf(sc, sh));
+      return rows.length ? h('div', { class: 'card vo-scene' }, h('h3', {}, `Сцена ${sc.num}. ${sc.heading}`), rows) : null;
+    }));
+}
+
 // ---------------------------------------------------------------- вкладка «Монтаж»
 let editKey = '';
 function renderEdit() {
@@ -1411,7 +1587,7 @@ function dropzone(el, onFiles) {
 function render() {
   const y = window.scrollY;
   if (S.tab !== 'edit' && engine.playing) engine.stop();
-  const body = S.tab === 'library' ? renderLibrary() : S.tab === 'board' ? renderBoard() : S.tab === 'conveyor' ? renderConveyor() : renderEdit();
+  const body = S.tab === 'library' ? renderLibrary() : S.tab === 'board' ? renderBoard() : S.tab === 'conveyor' ? renderConveyor() : S.tab === 'voice' ? renderVoice() : renderEdit();
   saveUi();
   $('#app').replaceChildren(...[renderHeader(), S.busy ? h('div', { class: 'busy' }, S.busy + '…') : null, h('div', { id: 'genbar', class: 'hidden' }), body].filter(Boolean));
   renderGenBar();
