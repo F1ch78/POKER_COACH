@@ -56,7 +56,18 @@ async function loadProjects() {
 
 function migrate(p) {
   p.assets = p.assets || {}; p.render = Object.assign(newProject('').render, p.render || {});
-  p.scenes.forEach(sc => { sc.assets = sc.assets || {}; sc.shots.forEach(sh => { sh.assets = sh.assets || {}; sh.override = sh.override || {}; }); });
+  p.scenes.forEach(sc => { sc.assets = sc.assets || {}; sc.shots.forEach(sh => { sh.assets = sh.assets || {}; sh.override = sh.override || {}; sh.sfx = sh.sfx || []; }); });
+  const snd = p.sound = p.sound || {};
+  snd.library = snd.library || []; snd.cues = snd.cues || [];
+  snd.levels = Object.assign({ voice: 1, music: 0.5, sfx: 0.9, amb: 0.6 }, snd.levels || {});
+  if (snd.duck == null) snd.duck = true;
+  // Прежняя «фоновая дорожка» становится музыкальным треком на весь фильм.
+  if (p.music) {
+    if (!snd.library.includes(p.music)) snd.library.push(p.music);
+    snd.cues.push({ id: uid(), asset: p.music, from: '', to: '', vol: 1, loop: false, fadeIn: 0, fadeOut: 2 });
+    snd.levels.music = p.render.musicVol == null ? 0.5 : p.render.musicVol;
+    p.music = '';
+  }
 }
 
 function selectProject(id) {
@@ -99,6 +110,9 @@ async function addAsset(file) {
 function referenced(id) {
   const p = S.p;
   if (p.music === id) return true;
+  const snd = p.sound || {};
+  if ((snd.library || []).includes(id) || (snd.cues || []).some(c => c.asset === id)) return true;
+  if (p.scenes.some(sc => (sc.ambience && sc.ambience.asset === id) || sc.shots.some(sh => (sh.sfx || []).some(fx => fx.asset === id)))) return true;
   if (p.characters.some(c => c.ref === id) || p.locations.some(l => l.ref === id)) return true;
   return p.scenes.some(sc => Object.values(sc.assets).includes(id) || sc.shots.some(sh => Object.values(sh.assets).includes(id) || (sh.history || []).includes(id)));
 }
@@ -369,7 +383,7 @@ function stats() {
 function renderHeader() {
   const sel = h('select', { onchange: e => selectProject(e.target.value) },
     S.list.map(p => h('option', { value: p.id, selected: p.id === S.p.id }, p.name)));
-  const tabs = [['library', '1 · Материалы'], ['board', '2 · Раскадровка'], ['conveyor', '3 · Конвейер'], ['voice', '4 · Озвучка'], ['edit', '5 · Монтаж']];
+  const tabs = [['library', '1 · Материалы'], ['board', '2 · Раскадровка'], ['conveyor', '3 · Конвейер'], ['voice', '4 · Озвучка'], ['sound', '5 · Звук'], ['edit', '6 · Монтаж']];
   const st = stats();
   return h('header', {},
     h('div', { class: 'brand' }, h('span', { class: 'sun' }), 'Студия'),
@@ -1172,10 +1186,31 @@ function voiceEngineCard() {
     'Голоса синтезирует программа Piper на этом компьютере, а запускает её мост. Сейчас студия открыта без моста. ',
     'Без моста звук можно загрузить вручную: кнопка «🔊 +» у шота в раскадровке.');
   if (e.old) return h('div', { class: 'card warn' }, h('b', {}, 'Мост запущен старой версией. '), 'Закройте его чёрное окно и снова запустите start-studio.bat.');
+  const own = Voice.list(e).filter(v => v.own);
+  const add = async () => {
+    const files = await pickFile('.onnx,.json', true);
+    if (!files.length) return;
+    try {
+      toast('Загружаю голос в мост…');
+      const r = await Voice.upload(files);
+      toast(`Голос ${r.name} добавлен` + (r.speakers > 1 ? `: в модели ${r.speakers} дикторов, читает первый` : '') + (r.lang && !/^ru/.test(r.lang) ? ` (язык модели: ${r.lang})` : ''));
+    } catch (err) { toast(err.message); }
+    VO.engine = undefined; render();
+  };
+  const del = async id => {
+    if (!confirm(`Удалить голос ${id} из папки tts\\voices?`)) return;
+    try { await Voice.remove(id); } catch (err) { toast(err.message); }
+    VO.engine = undefined; render();
+  };
   return h('div', { class: 'card' },
-    h('h3', {}, 'Движок: Piper, русские голоса'),
-    e.piper ? h('div', { class: 'muted small' }, `✓ Piper установлен · скачано голосов: ${(e.voices || []).length} из ${Voice.VOICES.length}`)
-      : h('div', { class: 'muted small' }, 'При первой озвучке мост скачает Piper (около 22 МБ) и выбранный голос (около 60 МБ) в папку content_studio\\tts. Это делается один раз, ход загрузки виден в окне моста.'));
+    h('h3', {}, 'Движок: Piper'),
+    e.piper ? h('div', { class: 'muted small' }, `✓ Piper установлен · скачано русских голосов: ${(e.voices || []).filter(Voice.builtIn).length} из ${Voice.VOICES.length}`)
+      : h('div', { class: 'muted small' }, 'При первой озвучке мост скачает Piper (около 22 МБ) и выбранный голос (около 60 МБ) в папку content_studio\\tts. Это делается один раз, ход загрузки виден в окне моста.'),
+    h('div', { class: 'row wrap', style: 'margin-top:10px' },
+      h('b', {}, 'Свои голоса:'),
+      own.length ? own.map(v => h('span', { class: 'chip' }, v.id, btn('✕', () => del(v.id), 'x', 'Удалить голос'))) : h('span', { class: 'muted small' }, 'нет'),
+      btn('＋ Загрузить голос', add, 'chip gen', 'Выберите сразу два файла голоса Piper: модель .onnx и настройки .onnx.json')),
+    h('div', { class: 'muted small' }, 'Подходит любой голос в формате Piper: пара файлов .onnx и .onnx.json (например, из каталога голосов Piper или своя обученная модель). Записать реплику своим голосом можно и проще: кнопка «⬆ Своя запись» у шота ниже.'));
 }
 
 function renderVoice() {
@@ -1199,7 +1234,8 @@ function renderVoice() {
         over ? h('div', { class: 'small', style: 'color:var(--gold)' }, sh ? 'Звук длиннее шота' : 'Звук длиннее сцены') : null),
       h('div', { class: 'row wrap vo-act' }, chip, audio,
         btn(busyNow ? '🎙 …' : st.state === 'none' ? '🎙 Озвучить' : '↻ Заново', () => voiceClick(sc, sh), 'chip gen', ready ? '' : 'Нужен мост: start-studio.bat'),
-        st.meta && st.meta.tts ? btn('✕', () => { const id = (sh || sc).assets.audio; delete (sh || sc).assets.audio; dropAsset(id); touch(); render(); }, 'ghost small', 'Убрать озвучку') : null));
+        btn('⬆ Своя запись', async () => { const [f] = await pickFile('audio/*'); if (f) { await setAsset(sh || sc, 'audio', f); render(); } }, 'ghost small', 'Загрузить готовую запись реплик (mp3, wav, m4a)'),
+        st.meta ? btn('✕', () => { const id = (sh || sc).assets.audio; delete (sh || sc).assets.audio; dropAsset(id); touch(); render(); }, 'ghost small', 'Убрать звук') : null));
   };
 
   return h('div', { class: 'page voice' },
@@ -1211,7 +1247,7 @@ function renderVoice() {
           const v = voiceOf(who);
           return h('div', { class: 'row wrap' },
             h('span', { class: 'vo-who' }, who === NARRATOR ? 'Рассказчик (закадровый текст)' : who, h('small', { class: 'muted' }, ` · ${n}`)),
-            h('select', { onchange: e => setCast(who, 'voice', e.target.value) }, Voice.VOICES.map(x => h('option', { value: x.id, selected: x.id === v.voice }, x.label))),
+            h('select', { onchange: e => setCast(who, 'voice', e.target.value) }, Voice.list(VO.engine).concat(Voice.list(VO.engine).some(x => x.id === v.voice) ? [] : [{ id: v.voice, label: v.voice + ' — нет в папке' }]).map(x => h('option', { value: x.id, selected: x.id === v.voice }, x.label))),
             h('select', { title: 'Скорость речи', onchange: e => setCast(who, 'speed', +e.target.value) },
               [0.8, 0.9, 1, 1.1, 1.2, 1.3].map(s => h('option', { value: s, selected: s === v.speed }, s === 1 ? 'обычно' : (s < 1 ? 'медленнее ×' : 'быстрее ×') + s))),
             btn('▶ Проба', e => voiceTry(who, e.currentTarget), 'ghost small', 'Прочитать первую реплику этим голосом'));
@@ -1242,7 +1278,7 @@ function renderEdit() {
   const p = S.p, r = p.render;
   const scenes = S.range === 'all' ? p.scenes : p.scenes.filter(s => s.id === S.range);
   const [w, hgt] = r.size.split('x').map(Number);
-  Object.assign(engine.opts, { letterbox: r.letterbox, subs: r.subs, labels: r.labels, fade: r.fade, videoAudio: r.videoAudio, musicVol: r.musicVol });
+  Object.assign(engine.opts, { letterbox: r.letterbox, subs: r.subs, labels: r.labels, fade: r.fade, videoAudio: r.videoAudio, levels: p.sound.levels, duck: p.sound.duck });
   if (engine.canvas.width !== w || engine.canvas.height !== hgt) engine.setSize(w, hgt);
 
   const time = h('span', { class: 'tc' }, '00:00.0');
@@ -1265,7 +1301,7 @@ function renderEdit() {
   };
   engine.onEnd = () => { playBtn.textContent = '▶'; };
 
-  const key = JSON.stringify([S.range, scenes.map(s => [s.id, s.narration, s.assets, s.shots.map(x => [x.id, x.dur, x.kind, x.assets, x.dialogue, x.title, x.text])]), p.music]);
+  const key = JSON.stringify([S.range, scenes.map(s => [s.id, s.narration, s.assets, s.ambience, s.shots.map(x => [x.id, x.dur, x.kind, x.assets, x.dialogue, x.title, x.text, x.sfx])]), p.music, p.sound.cues]);
   const ready = (key === editKey) ? Promise.resolve() : engine.load(p, scenes).then(() => { editKey = key; });
   ready.then(() => {
     if (S.seekShot) { const it = engine.items.find(x => x.shot.id === S.seekShot); S.seekShot = null; if (it) engine.seek(it.start); }
@@ -1302,10 +1338,8 @@ function renderEdit() {
         h('div', { class: 'row wrap' },
           tog('letterbox', 'Кашетирование 2.39:1'), tog('subs', 'Субтитры'), tog('labels', 'Код шота в записи'), tog('fade', 'Затемнение между сценами'), tog('videoAudio', 'Звук из видеофайлов')),
         h('div', { class: 'row wrap' },
-          p.music && p.assets[p.music] ? h('span', { class: 'chip' }, '🎵 ' + p.assets[p.music].name,
-            btn('✕', () => { const id = p.music; p.music = ''; dropAsset(id); touch(); render(); }, 'x')) :
-            btn('🎵 Фоновая дорожка', async () => { const [f] = await pickFile('audio/*'); if (f) { await setAsset(p, 'music', f); render(); } }),
-          p.music ? h('label', { class: 'check' }, 'громкость', h('input', { type: 'range', min: 0, max: 1, step: 0.05, value: r.musicVol, onchange: e => set('musicVol', +e.target.value) })) : null)),
+          h('span', { class: 'muted small' }, soundSummary()),
+          btn('🎵 Музыка и звуки →', () => { S.tab = 'sound'; render(); window.scrollTo(0, 0); }, 'ghost small'))),
       h('div', { class: 'card' },
         h('h3', {}, 'Готовое видео'),
         h('p', { class: 'muted small' }, `Запись идёт в реальном времени (${fmtDur(engine.duration || st.dur)}), не сворачивайте вкладку. Формат: ${(Engine.mimeType() || 'не поддерживается').split(';')[0]}. Код шота и тайм-код видны только в предпросмотре, в файл не попадают (если не включить слева).`),
@@ -1587,7 +1621,7 @@ function dropzone(el, onFiles) {
 function render() {
   const y = window.scrollY;
   if (S.tab !== 'edit' && engine.playing) engine.stop();
-  const body = S.tab === 'library' ? renderLibrary() : S.tab === 'board' ? renderBoard() : S.tab === 'conveyor' ? renderConveyor() : S.tab === 'voice' ? renderVoice() : renderEdit();
+  const body = S.tab === 'library' ? renderLibrary() : S.tab === 'board' ? renderBoard() : S.tab === 'conveyor' ? renderConveyor() : S.tab === 'voice' ? renderVoice() : S.tab === 'sound' ? renderSound() : renderEdit();
   saveUi();
   $('#app').replaceChildren(...[renderHeader(), S.busy ? h('div', { class: 'busy' }, S.busy + '…') : null, h('div', { id: 'genbar', class: 'hidden' }), body].filter(Boolean));
   renderGenBar();
@@ -1635,7 +1669,7 @@ window.addEventListener('keydown', e => {
 });
 
 window.addEventListener('dragover', e => e.preventDefault());
-window.addEventListener('drop', e => { e.preventDefault(); if (e.dataTransfer.files.length) importFiles([...e.dataTransfer.files]); });
+window.addEventListener('drop', e => { e.preventDefault(); if (!e.dataTransfer.files.length) return; if (S.tab === 'sound') soundUpload([...e.dataTransfer.files]); else importFiles([...e.dataTransfer.files]); });
 window.addEventListener('beforeunload', () => { flush(); });
 
 (async () => {

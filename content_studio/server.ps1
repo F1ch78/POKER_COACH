@@ -144,11 +144,12 @@ function Install-Piper {
   if (-not (Test-Path -LiteralPath $piperExe)) { throw 'В архиве Piper нет piper.exe' }
 }
 
-# ru_RU-irina-medium → voices\ru_RU-irina-medium.onnx (+ .onnx.json)
+# ru_RU-irina-medium → voices\ru_RU-irina-medium.onnx (+ .onnx.json). Свои голоса уже лежат в папке, их не качаем.
 function Install-Voice([string]$name) {
-  if ($name -notmatch '^(([a-z]{2})_[A-Z]{2})-([a-z0-9_]+)-(x_low|low|medium|high)$') { throw "Неизвестный голос: $name" }
+  if (-not (Test-VoiceName $name)) { throw "Неподходящее имя голоса: $name" }
   $model = Join-Path $voiceDir "$name.onnx"
   if ((Test-Path -LiteralPath $model) -and (Test-Path -LiteralPath "$model.json")) { return $model }
+  if ($name -notmatch '^(([a-z]{2})_[A-Z]{2})-([a-z0-9_]+)-(x_low|low|medium|high)$') { throw "Голоса $name нет в папке tts\voices. Загрузите его заново во вкладке «Озвучка»." }
   Write-Host "  Озвучка: скачиваю голос $name (один раз)…" -ForegroundColor Cyan
   $null = New-Item -ItemType Directory -Force -Path $voiceDir
   $rel = "/rhasspy/piper-voices/resolve/v1.0.0/$($Matches[2])/$($Matches[1])/$($Matches[3])/$($Matches[4])/$name.onnx"
@@ -161,9 +162,33 @@ function Install-Voice([string]$name) {
   throw "Не удалось скачать голос $name`: $why"
 }
 
+function Test-VoiceName([string]$name) { return ($name -match '^[A-Za-z0-9_][A-Za-z0-9_.-]{0,79}$') -and -not $name.Contains('..') }
+
+# Свой голос: студия присылает .onnx.json и .onnx по очереди (заголовки X-Voice-Name и X-Voice-Part).
+function Save-Voice($req, $res) {
+  $name = [string]$req.Headers['X-Voice-Name']; $part = [string]$req.Headers['X-Voice-Part']
+  if (-not (Test-VoiceName $name) -or ($part -ne 'json' -and $part -ne 'onnx')) { return Send-Error $res 400 'Неподходящее имя файла голоса' }
+  $null = New-Item -ItemType Directory -Force -Path $voiceDir
+  $file = Join-Path $voiceDir ("$name.onnx" + $(if ($part -eq 'json') { '.json' } else { '' }))
+  $tmp = $file + '.part'
+  $out = [IO.File]::Create($tmp)
+  try { $req.InputStream.CopyTo($out) } finally { $out.Close() }
+  Move-Item -LiteralPath $tmp -Destination $file -Force
+  Write-Host ("  Озвучка: загружен свой голос {0} ({1:N1} МБ)" -f [IO.Path]::GetFileName($file), ((Get-Item -LiteralPath $file).Length / 1MB)) -ForegroundColor Green
+  Send-Json $res 200 '{"ok":true}'
+}
+
+function Remove-Voice($req, $res) {
+  $name = [string]$req.QueryString['name']
+  if (-not (Test-VoiceName $name)) { return Send-Error $res 400 'Неподходящее имя голоса' }
+  foreach ($f in @("$name.onnx", "$name.onnx.json")) { Remove-Item -LiteralPath (Join-Path $voiceDir $f) -Force -ErrorAction SilentlyContinue }
+  Write-Host "  Озвучка: удалён голос $name" -ForegroundColor Yellow
+  Send-Json $res 200 '{"ok":true}'
+}
+
 function Send-TtsStatus($res) {
   $voices = @()
-  if (Test-Path -LiteralPath $voiceDir) { $voices = @(Get-ChildItem -LiteralPath $voiceDir -Filter '*.onnx' | ForEach-Object { ConvertTo-Json $_.BaseName }) }
+  if (Test-Path -LiteralPath $voiceDir) { $voices = @(Get-ChildItem -LiteralPath $voiceDir -Filter '*.onnx' | Where-Object { Test-Path -LiteralPath ($_.FullName + '.json') } | ForEach-Object { ConvertTo-Json $_.BaseName }) }
   $piper = $(if (Test-Path -LiteralPath $piperExe) { 'true' } else { 'false' })
   Send-Json $res 200 ('{"piper":' + $piper + ',"voices":[' + ($voices -join ',') + ']}')
 }
@@ -207,10 +232,15 @@ function Send-Speech($req, $res) {
 function Invoke-Request($ctx) {
   $req = $ctx.Request; $res = $ctx.Response
   $path = $req.Url.AbsolutePath
-  if ($path -eq '/__studio') { return Send-Json $res 200 '{"bridge":true,"version":3,"downloads":true,"tts":true}' }
-  if ($path -eq '/__tts') {
+  if ($path -eq '/__studio') { return Send-Json $res 200 '{"bridge":true,"version":4,"downloads":true,"tts":true,"voices":true}' }
+  if ($path -eq '/__tts' -or $path -eq '/__tts/voice') {
     $from = $req.Headers['Origin']
     if ($from -and $from -ne $origin -and $from -ne "http://127.0.0.1:$Port") { return Send-Error $res 403 'forbidden' }
+    if ($path -eq '/__tts/voice') {
+      if ($req.HttpMethod -eq 'POST') { return Save-Voice $req $res }
+      if ($req.HttpMethod -eq 'DELETE') { return Remove-Voice $req $res }
+      return Send-Error $res 405 'method not allowed'
+    }
     if ($req.HttpMethod -eq 'POST') { return Send-Speech $req $res } else { return Send-TtsStatus $res }
   }
   if ($path -eq '/__downloads' -or $path -eq '/__download') {

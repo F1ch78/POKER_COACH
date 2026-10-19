@@ -8,7 +8,8 @@ class Engine {
     this.g = canvas.getContext('2d');
     this.items = []; this.subs = []; this.audio = [];
     this.media = new Map();          // assetId → { kind, el, url }
-    this.opts = { letterbox: true, subs: true, labels: true, fade: true, videoAudio: true, musicVol: 0.4 };
+    this.opts = { letterbox: true, subs: true, labels: true, fade: true, videoAudio: true, levels: { voice: 1, music: 0.5, sfx: 0.9, amb: 0.6 }, duck: true };
+    this.tracks = new Map();         // ключ звуковой дорожки → <audio>
     this.playing = false; this.t = 0; this.duration = 0;
     this.onTime = () => {}; this.onEnd = () => {};
     this.actx = null; this.dest = null; this.sources = new WeakMap();
@@ -20,7 +21,7 @@ class Engine {
   // ---------------------------------------------------------------- линейка
   async load(project, scenes) {
     this.stop();
-    const items = [], subs = [], audio = [];
+    const items = [], subs = [], spans = [];
     let t = 0;
     for (const sc of scenes) {
       const sceneStart = t;
@@ -35,7 +36,6 @@ class Engine {
           subs.push({ start: s, end: s + len, text: d.line.replace(/^\([^)]*\)\s*/, ''), vo: d.vo });
           s += len;
         }
-        if (sh.assets.audio) audio.push({ id: sh.assets.audio, start: t });
         t += dur;
       });
       if (sc.narration && sc.narration.length) {
@@ -44,9 +44,9 @@ class Engine {
         let s = sceneStart;
         for (const x of sentences) { const len = (t - sceneStart) * x.length / total; subs.push({ start: s, end: s + len, text: x.trim(), vo: true }); s += len; }
       }
-      if (sc.assets && sc.assets.audio) audio.push({ id: sc.assets.audio, start: sceneStart });
+      spans.push({ sc, start: sceneStart, end: t });
     }
-    if (project.music) audio.push({ id: project.music, start: 0, music: true });
+    const audio = this.soundPlan(project, scenes, items, spans, t);
     this.items = items; this.subs = subs; this.audio = audio; this.duration = t;
     this.title = project.name;
 
@@ -54,6 +54,7 @@ class Engine {
     items.forEach(it => { if (it.shot.assets.video) ids.add(it.shot.assets.video); else if (it.shot.assets.image) ids.add(it.shot.assets.image); });
     audio.forEach(a => ids.add(a.id));
     await Promise.all([...ids].map(id => this.loadAsset(id, project.assets[id])));
+    await this.loadTracks(audio);
     this.t = Math.min(this.t, t);
     this.draw(this.t);
   }
@@ -77,6 +78,80 @@ class Engine {
   }
 
   // ---------------------------------------------------------------- звук
+  // Дорожки: голос (озвучка шотов и сцен), музыка (треки по сценам), атмосфера сцены (по кругу), эффекты в шотах.
+  // Время дорожки: start…end на линейке, offset — с какого места файла начинать.
+  soundPlan(project, scenes, items, spans, total) {
+    const snd = project.sound || {}, audio = [];
+    items.forEach(it => {
+      if (it.shot.assets.audio) audio.push({ key: 'v' + it.shot.id, id: it.shot.assets.audio, start: it.start, group: 'voice' });
+      (it.shot.sfx || []).forEach(fx => { if (fx.asset) audio.push({ key: 'x' + fx.id, id: fx.asset, start: it.start + Math.max(0, +fx.at || 0), vol: fx.vol == null ? 1 : +fx.vol, group: 'sfx' }); });
+    });
+    spans.forEach(sp => {
+      if (sp.sc.assets && sp.sc.assets.audio) audio.push({ key: 'n' + sp.sc.id, id: sp.sc.assets.audio, start: sp.start, group: 'voice' });
+      const amb = sp.sc.ambience;
+      if (amb && amb.asset) audio.push({ key: 'a' + sp.sc.id, id: amb.asset, start: sp.start, end: sp.end, loop: true, vol: amb.vol == null ? 1 : +amb.vol, fadeIn: 0.7, fadeOut: 0.7, group: 'amb' });
+    });
+    // Музыка привязана к сценам всего фильма; при просмотре одной сцены трек играет с нужного места.
+    const full = {};
+    let ft = 0;
+    for (const sc of project.scenes) { const d = sc.shots.reduce((a, sh) => a + Math.max(0.5, +sh.dur || 3), 0); full[sc.id] = { start: ft, end: ft + d }; ft += d; }
+    const whole = scenes.length === project.scenes.length;
+    (snd.cues || []).forEach(c => {
+      if (!c.asset) return;
+      const cs = c.from && full[c.from] ? full[c.from].start : 0;
+      const ce = c.to && full[c.to] ? full[c.to].end : (c.loop ? ft : Infinity);
+      if (ce <= cs) return;
+      const base = { id: c.asset, loop: !!c.loop, vol: c.vol == null ? 1 : +c.vol, group: 'music' };
+      if (whole) audio.push(Object.assign({ key: 'm' + c.id, start: cs, end: ce, offset: 0, fadeIn: +c.fadeIn || 0, fadeOut: +c.fadeOut || 0 }, base));
+      else spans.forEach(sp => {
+        const f = full[sp.sc.id], a = Math.max(cs, f.start), b = Math.min(ce, f.end);
+        if (b <= a) return;
+        audio.push(Object.assign({ key: 'm' + c.id + sp.sc.id, start: sp.start + a - f.start, end: sp.start + b - f.start, offset: a - cs,
+          fadeIn: a === cs ? +c.fadeIn || 0 : 0, fadeOut: b === ce ? +c.fadeOut || 0 : 0 }, base));
+      });
+    });
+    if (project.music) audio.push({ key: 'music', id: project.music, start: 0, group: 'music' });
+    audio.forEach(a => { if (a.end === Infinity) delete a.end; if (a.loop && a.end == null) a.end = total; });
+    return audio;
+  }
+
+  // У каждой дорожки свой <audio>: один и тот же звук может звучать в нескольких местах сразу.
+  async loadTracks(audio) {
+    const keep = new Set();
+    await Promise.all(audio.map(async a => {
+      const m = this.media.get(a.id);
+      if (!m) return;
+      keep.add(a.key);
+      let el = this.tracks.get(a.key);
+      if (!el || el.dataset.src !== m.url) {
+        if (el) el.pause();
+        el = document.createElement('audio');
+        el.src = m.url; el.dataset.src = m.url; el.preload = 'auto'; el.crossOrigin = 'anonymous';
+        this.tracks.set(a.key, el);
+        await new Promise(res => { el.onloadedmetadata = res; el.onerror = res; setTimeout(res, 8000); });
+      }
+      el.loop = !!a.loop;
+      a.el = el;
+    }));
+    for (const [k, el] of this.tracks) if (!keep.has(k)) { el.pause(); this.tracks.delete(k); }
+  }
+
+  trackEnd(a) {
+    const d = a.el.duration || 0;
+    if (a.loop) return a.end;
+    return Math.min(a.end == null ? Infinity : a.end, a.start + Math.max(0, d - (a.offset || 0)));
+  }
+
+  trackGain(a, t, duck) {
+    const lv = this.opts.levels || {};
+    let g = (a.vol == null ? 1 : a.vol) * (lv[a.group] == null ? 1 : lv[a.group]);
+    if (a.fadeIn) g *= Math.min(1, (t - a.start) / a.fadeIn);
+    const end = this.trackEnd(a);
+    if (a.fadeOut && isFinite(end)) g *= Math.min(1, Math.max(0, (end - t) / a.fadeOut));
+    if (duck && a.group === 'music') g *= 0.35;
+    return Math.max(0, g);
+  }
+
   ensureAudio() {
     if (this.actx) return;
     this.actx = new (window.AudioContext || window.webkitAudioContext)();
@@ -94,9 +169,12 @@ class Engine {
       const src = this.actx.createMediaElementSource(el);
       const gain = this.actx.createGain();
       src.connect(gain); gain.connect(this.actx.destination); gain.connect(this.dest);
-      node = { gain }; this.sources.set(el, node);
+      node = { gain, v: vol }; this.sources.set(el, node);
+      gain.gain.value = vol;
     }
-    node.gain.gain.value = vol;
+    if (Math.abs(node.v - vol) < 0.002) return;
+    node.v = vol;
+    node.gain.gain.setTargetAtTime(vol, this.actx.currentTime, 0.08);   // плавно: без щелчков при приглушении
   }
 
   itemAt(t) {
@@ -124,13 +202,18 @@ class Engine {
       const nm = next && this.mediaOf(next);
       if (nm && nm.kind === 'video' && nm !== m) { nm.el.pause(); nm.el.currentTime = 0; }
     }
+    const live = a => a.el && t >= a.start && t < this.trackEnd(a);
+    const duck = this.opts.duck && this.audio.some(a => a.group === 'voice' && live(a));
     for (const a of this.audio) {
-      const m = this.media.get(a.id);
-      if (!m) continue;
-      const d = m.el.duration || 0, inside = t >= a.start && t < a.start + d;
-      if (inside && this.playing) {
-        if (m.el.paused && !(m.el.ended && t > a.start + d - 0.5)) { m.el.currentTime = t - a.start; this.route(m.el, a.music ? this.opts.musicVol : 1); m.el.play().catch(() => {}); }
-      } else if (!m.el.paused) m.el.pause();
+      const el = a.el;
+      if (!el) continue;
+      if (live(a) && this.playing) {
+        const d = el.duration || 0;
+        let pos = (a.offset || 0) + t - a.start;
+        if (a.loop && d) pos %= d;
+        if (el.paused && !(!a.loop && d && pos > d - 0.3)) { el.currentTime = pos; this.route(el, this.trackGain(a, t, duck)); el.play().catch(() => {}); }
+        else this.route(el, this.trackGain(a, t, duck));
+      } else if (!el.paused) el.pause();
     }
   }
 
@@ -141,6 +224,7 @@ class Engine {
 
   pauseAll() {
     for (const m of this.media.values()) if (m.el.pause) m.el.pause();
+    for (const el of this.tracks.values()) el.pause();
     this.current = null;
   }
 

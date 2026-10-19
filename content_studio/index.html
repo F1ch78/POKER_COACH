@@ -82,11 +82,26 @@
   .meter { display: flex; flex-direction: column; gap: 3px; margin-top: 8px; font-size: 13px; }
   .meter i, .bar { display: block; height: 5px; background: var(--panel2); border-radius: 3px; overflow: hidden; }
   .meter i b, .bar b { display: block; height: 100%; background: var(--gold); }
-  .vo-scene { margin-top: 14px; }
+  .vo-scene, .snd-scene { margin-top: 14px; }
+  .snd-lib { display: grid; gap: 6px; margin-top: 10px; }
+  .snd-item { display: grid; grid-template-columns: 1fr auto 220px auto; gap: 8px; align-items: center; }
+  .snd-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .snd-item audio { height: 30px; width: 220px; }
+  .snd-cue { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; padding: 8px 0; border-top: 1px solid var(--line); }
+  .snd-cue .field { flex-direction: row; align-items: center; gap: 6px; }
+  .snd-shot { display: grid; grid-template-columns: 80px 1fr minmax(260px, auto); gap: 10px; align-items: start; padding: 8px 0; border-top: 1px solid var(--line); }
+  .snd-note { color: var(--gold); }
+  .snd-fx { display: grid; gap: 6px; justify-items: start; }
+  .vol { display: inline-flex; align-items: center; gap: 6px; }
+  .vol input { width: 110px; }
+  .secs { display: inline-flex; align-items: center; gap: 4px; }
+  .secs input { width: 64px; }
+  .mix { margin: 6px 0; }
+  .mix-name { min-width: 90px; }
   .vo-row { display: grid; grid-template-columns: 80px 1fr auto; gap: 10px; align-items: center; padding: 8px 0; border-top: 1px solid var(--line); }
   .vo-row audio { height: 30px; max-width: 220px; }
   .vo-cast .row { display: grid; grid-template-columns: 1fr auto auto auto; align-items: center; margin: 6px 0; }
-  @media (max-width: 760px) { .vo-row, .vo-cast .row { grid-template-columns: 1fr; } }
+  @media (max-width: 760px) { .vo-row, .vo-cast .row, .snd-shot, .snd-item { grid-template-columns: 1fr; } .snd-item audio { width: 100%; } }
   .chip { font-size: 13px; padding: 3px 9px; border-radius: 999px; }
   .chip.on { background: #2b2414; border-color: var(--gold); color: var(--gold); }
   .chip.warnchip { border-color: #6b5222; }
@@ -200,6 +215,7 @@
 <script src="render.js"></script>
 <script src="ai.js"></script>
 <script src="voice.js"></script>
+<script src="sound.js"></script>
 <script src="studio.js"></script>
 <script>if ('serviceWorker' in navigator && location.protocol === 'https:') navigator.serviceWorker.register('sw.js').catch(() => {});</script>
 </body>

@@ -1,6 +1,6 @@
 // Офлайн-режим: сначала сеть (чтобы приходили обновления), при её отсутствии — кэш.
-const CACHE = 'content-studio-v2';
-const FILES = ['./', 'index.html', 'parser.js', 'db.js', 'prompts.js', 'render.js', 'ai.js', 'voice.js', 'studio.js', 'manifest.json', 'icon.svg'];
+const CACHE = 'content-studio-v3';
+const FILES = ['./', 'index.html', 'parser.js', 'db.js', 'prompts.js', 'render.js', 'ai.js', 'voice.js', 'sound.js', 'studio.js', 'manifest.json', 'icon.svg'];
 
 self.addEventListener('install', e => { e.waitUntil(caches.open(CACHE).then(c => c.addAll(FILES))); self.skipWaiting(); });
 self.addEventListener('activate', e => {
