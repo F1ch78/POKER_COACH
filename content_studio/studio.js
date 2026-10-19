@@ -145,7 +145,7 @@ function thumb(id, cls) {
 async function setAsset(holder, slot, file) {
   const old = holder.assets ? holder.assets[slot] : holder[slot];
   const id = await addAsset(file);
-  if (holder.assets) holder.assets[slot] = id; else holder[slot] = id;
+  if (holder.assets) { holder.assets[slot] = id; reviewReset(holder, slot); } else holder[slot] = id;
   dropAsset(old);
   touch();
   return id;
@@ -545,7 +545,8 @@ function renderBoard() {
     const head = s.act !== act ? h('div', { class: 'act' }, (act = s.act)) : null;
     return [head, h('button', { class: 'scene' + (s === sc ? ' on' : ''), onclick: () => { S.sceneId = s.id; render(); window.scrollTo(0, 0); } },
       h('b', {}, s.num + '. '), s.heading.split(/\s+[-–—]\s+/)[0],
-      h('small', {}, `${s.shots.length} шот. · ${fmtDur(s.shots.reduce((a, x) => a + (+x.dur || 0), 0))} · ${done}/${pics.length}`),
+      h('small', {}, `${s.shots.length} шот. · ${fmtDur(s.shots.reduce((a, x) => a + (+x.dur || 0), 0))} · ${done}/${pics.length}`,
+        ['redo', 'fix'].map(k => { const n = reviewCount(s.shots, k); return n ? h('b', { class: 'cnt st-' + k, title: STATE_LABEL[k] }, ` ${REVIEW[k].icon}${n}`) : null; })),
       h('i', { class: 'bar' }, h('b', { style: `width:${pics.length ? 100 * done / pics.length : 0}%` })))];
   }));
   const dur = sc.shots.reduce((a, x) => a + (+x.dur || 0), 0);
@@ -584,6 +585,10 @@ const FILTERS = {
   novid: { label: 'Без видео', test: sh => !Prompts.noPicture(sh) && !sh.assets.video },
   noen: { label: 'Без описания EN', test: sh => !Prompts.noPicture(sh) && !sh.en },
   talk: { label: 'С репликами', test: sh => sh.dialogue.length > 0 },
+  wait: { label: '● Ждут проверки', test: sh => shotStages(sh).some(st => reviewState(sh, st) === 'wait') },
+  fix: { label: '✎ Доработать', test: sh => shotStages(sh).some(st => reviewState(sh, st) === 'fix') },
+  redo: { label: '✕ Переделать', test: sh => shotStages(sh).some(st => reviewState(sh, st) === 'redo') },
+  notes: { label: '📝 С заметками', test: sh => hasNotes(sh) },
 };
 function filterBar(sc) {
   return h('div', { class: 'row wrap filters' },
@@ -623,7 +628,14 @@ function shotCard(sc, sh, i) {
     h('span', { class: 'code' }, code));
   dropzone(preview, async files => { for (const f of files) { const s = slotOf(f.type || guessType(f.name)); if (s) await setAsset(sh, s, f); } render(); });
 
-  const card = h('div', { class: 'shot' + (sh.assets.video ? ' has-video' : sh.assets.image ? ' has-image' : '') + (S.focusShot === sh.id ? ' focus' : ''),
+  const openKey = S.rvOpen && S.rvOpen.split(':')[0] === sh.id ? S.rvOpen.split(':')[1] : '';
+  const reviews = h('div', { class: 'row wrap rv-row' },
+    h('span', { class: 'muted small' }, 'Оценка:'),
+    shotStages(sh).filter(st => hasResult(sh, st) || reviewNote(sh, st)).map(st =>
+      reviewDot(sh, st, () => { S.rvOpen = openKey === st ? '' : sh.id + ':' + st; render(); }, openKey === st)),
+    shotStages(sh).some(st => hasResult(sh, st) || reviewNote(sh, st)) ? null : h('span', { class: 'muted small' }, 'результатов пока нет'),
+    !openKey ? btn('📝', () => { S.rvOpen = sh.id + ':' + (shotStages(sh).find(st => hasResult(sh, st)) || shotStages(sh)[0]); render(); }, 'ghost small', 'Оставить заметку') : null);
+  const card = h('div', { class: 'shot st-' + shotState(sh) + (S.focusShot === sh.id ? ' focus' : ''),
     'data-shot': sh.id, onpointerdown: () => {
       if (S.focusShot === sh.id) return;
       S.focusShot = sh.id;
@@ -667,6 +679,8 @@ function shotCard(sc, sh, i) {
         videoButton(sc, sh, 'chip gen'),
         ['image', 'video', 'audio'].map(slot => assetSlot(sh, slot))) :
         h('div', { class: 'row' }, assetSlot(sh, 'audio')),
+      reviews,
+      openKey ? reviewBar(sh, openKey, { title: STAGE_LABEL[openKey] + ':' }) : null,
       promptsBox));
   return card;
 }
@@ -865,9 +879,11 @@ function updateBusyLabels(id) {
 function openViewer(sh, sc) {
   const slots = ['video', 'image'].filter(s => sh.assets[s]);
   let cur = slots[0];
-  const box = h('div', { class: 'viewer-media' });
+  const box = h('div', { class: 'viewer-media' }), rvBox = h('div');
   const show = () => {
     const id = sh.assets[cur], meta = S.p.assets[id];
+    const rv = () => fill(rvBox, reviewBar(sh, cur, { title: STAGE_LABEL[cur] + ':', rows: 2, rerender: () => { rv(); render(); } }));
+    rv();
     const el = h(meta.type.startsWith('video') ? 'video' : 'img', { controls: true, autoplay: true, playsInline: true });
     assetUrl(id).then(u => { el.src = u; });
     fill(box, el, h('div', { class: 'muted small' }, `${meta.name} · ${(meta.size / 1048576).toFixed(1)} МБ` + (meta.duration ? ` · ${meta.duration} с` : '')));
@@ -879,14 +895,14 @@ function openViewer(sh, sc) {
     history.map(id => h('button', { class: 'variant', title: kindOf(id) === 'video' ? 'Сделать основным видео' : 'Сделать основной картинкой', onclick: () => {
       const slot = kindOf(id);
       sh.history = (sh.assets[slot] ? [sh.assets[slot]] : []).concat(history.filter(x => x !== id));
-      sh.assets[slot] = id; touch(); dlg.close(); render(); toast('Вариант возвращён');
+      sh.assets[slot] = id; reviewReset(sh, slot); touch(); dlg.close(); render(); toast('Вариант возвращён');
     } }, thumb(id, ''), kindOf(id) === 'video' ? h('span', { class: 'vbadge' }, '🎬') : null))) : null;
   const dlg = h('dialog', { class: 'viewer' },
     h('div', { class: 'row' }, h('b', {}, `${Prompts.code(sc, sh)} · ${sh.kind}`), h('span', { class: 'muted grow' }, sh.text.slice(0, 120)),
       slots.length > 1 ? slots.map(s => btn(s === 'video' ? '🎬 Видео' : '🖼 Картинка', () => { cur = s; show(); }, 'chip')) : null,
       btn('⬇ Скачать', async () => { const id = sh.assets[cur]; download(S.p.assets[id].name, await DB.getBlob(id)); }, 'ghost'),
       btn('✕', () => dlg.close(), 'ghost')),
-    box, variants);
+    box, rvBox, variants);
   dlg.addEventListener('close', () => dlg.remove());
   dlg.addEventListener('click', e => { if (e.target === dlg) dlg.close(); });
   document.body.append(dlg); dlg.showModal(); show();
@@ -1030,6 +1046,8 @@ function renderConveyor() {
       h('b', {}, result ? 'Готово. Можно заменить:' : S.conv.watch && S.bridgeOk ? 'Скачайте результат с сайта — он попадёт сюда сам' : 'Вставьте результат'),
       h('div', {}, 'Ctrl+V из буфера · перетащите файл · ', btn('выбрать файл', async () => convAttach(await pickFile('image/*,video/*,audio/*', true)), 'linkish'))));
   dropzone(drop, convAttach);
+  const stage = S.conv.mode === 'video' ? 'video' : (sh.assets.image || !sh.assets.video ? 'image' : 'video');
+  const convState = x => reviewState(x.sh, S.conv.mode === 'video' ? 'video' : (x.sh.assets.image || !x.sh.assets.video ? 'image' : 'video'));
 
   return h('div', { class: 'page conveyor' },
     top,
@@ -1059,6 +1077,7 @@ function renderConveyor() {
           btn('✎ Править в раскадровке', () => { S.tab = 'board'; S.sceneId = sc.id; S.focusShot = sh.id; S.filter = 'all'; render(); const el = document.querySelector(`[data-shot="${sh.id}"]`); if (el) el.scrollIntoView({ block: 'center' }); }, 'ghost'))),
       h('div', { class: 'conv-side' },
         drop,
+        reviewBar(sh, stage, { title: STAGE_LABEL[stage] + ':' }),
         refs.length ? h('div', { class: 'card' }, h('div', { class: 'muted small' }, 'Референсы для генератора — скачайте и приложите к промпту'),
           h('div', { class: 'refs' }, refs.map(r => h('figure', {},
             thumb(r.id, ''), h('figcaption', {}, r.label),
@@ -1070,7 +1089,7 @@ function renderConveyor() {
           btn('К незаполненному ⇥', () => convGo(1, true), 'primary')),
         h('div', { class: 'muted small' }, 'Клавиши: ← → — шоты, G — сгенерировать, C — скопировать промпт, Ctrl+V — вставить результат.'),
         h('div', { class: 'conv-list' }, q.map((x, j) => h('button', {
-          class: 'conv-item' + (j === i ? ' on' : '') + (convDone(x.sh) ? ' ok' : ''), title: x.sh.text,
+          class: 'conv-item st-' + convState(x) + (j === i ? ' on' : ''), title: `${STATE_LABEL[convState(x)]}\n${reviewNote(x.sh, S.conv.mode === 'video' ? 'video' : 'image') || x.sh.text}`,
           onclick: () => { S.conv.shotId = x.sh.id; render(); if (S.conv.autoCopy) convCopy(); } }, Prompts.code(x.sc, x.sh)))))));
 }
 
@@ -1228,6 +1247,7 @@ function renderVoice() {
     const chip = { none: h('span', { class: 'chip' }, 'не озвучено'), ok: h('span', { class: 'chip on' }, `✓ ${st.meta && st.meta.duration || ''} с`),
       stale: h('span', { class: 'chip warnchip', title: 'Текст или голос изменились после озвучки' }, '⚠ устарела'), own: h('span', { class: 'chip', title: st.meta && st.meta.name }, '🔊 свой звук') }[st.state];
     const over = sh ? st.meta && st.meta.duration > sh.dur : st.meta && st.meta.duration > sc.shots.reduce((a, x) => a + (+x.dur || 0), 0);
+    const holder = sh || sc, rvOpen = S.rvOpen === holder.id + ':audio';
     return h('div', { class: 'vo-row' },
       h('b', { class: 'vo-code' }, sh ? Prompts.code(sc, sh) : 'за кадром'),
       h('div', { class: 'vo-lines' }, st.lines.map(l => h('div', {}, h('span', { class: 'muted' }, l.who + ': '), l.text)),
@@ -1235,7 +1255,9 @@ function renderVoice() {
       h('div', { class: 'row wrap vo-act' }, chip, audio,
         btn(busyNow ? '🎙 …' : st.state === 'none' ? '🎙 Озвучить' : '↻ Заново', () => voiceClick(sc, sh), 'chip gen', ready ? '' : 'Нужен мост: start-studio.bat'),
         btn('⬆ Своя запись', async () => { const [f] = await pickFile('audio/*'); if (f) { await setAsset(sh || sc, 'audio', f); render(); } }, 'ghost small', 'Загрузить готовую запись реплик (mp3, wav, m4a)'),
-        st.meta ? btn('✕', () => { const id = (sh || sc).assets.audio; delete (sh || sc).assets.audio; dropAsset(id); touch(); render(); }, 'ghost small', 'Убрать звук') : null));
+        st.meta ? btn('✕', () => { const id = (sh || sc).assets.audio; delete (sh || sc).assets.audio; dropAsset(id); touch(); render(); }, 'ghost small', 'Убрать звук') : null,
+        st.meta || reviewNote(holder, 'audio') ? reviewDot(holder, 'audio', () => { S.rvOpen = rvOpen ? '' : holder.id + ':audio'; render(); }, rvOpen) : null),
+      rvOpen ? h('div', { class: 'vo-review' }, reviewBar(holder, 'audio')) : null);
   };
 
   return h('div', { class: 'page voice' },
@@ -1292,12 +1314,25 @@ function renderEdit() {
   const strip = h('div', { class: 'strip', title: 'Щелчок — перейти к шоту. Клавиши: пробел, ← →' });
   const head = h('i', { class: 'playhead' });
   const sceneLabel = h('span', { class: 'muted' });
+  const rvNow = h('div', { class: 'rv-now' });
+  let rvShot = null;
+  const showReview = it => {
+    rvShot = it ? it.shot.id : null;
+    if (!it) return fill(rvNow);
+    const sh = it.shot, stages = shotStages(sh);
+    const open = S.rvOpen && S.rvOpen.split(':')[0] === sh.id ? S.rvOpen.split(':')[1] : (hasResult(sh, visualStage(sh)) || Prompts.noPicture(sh) ? (Prompts.noPicture(sh) ? 'audio' : visualStage(sh)) : '');
+    fill(rvNow, h('div', { class: 'row wrap' },
+      h('b', {}, Prompts.code(it.scene, sh)), h('span', { class: 'muted small grow' }, (sh.text || sh.title || '').slice(0, 90)),
+      stages.map(st => reviewDot(sh, st, () => { S.rvOpen = sh.id + ':' + st; showReview(it); }, open === st))),
+      open ? reviewBar(sh, open, { title: STAGE_LABEL[open] + ':', rerender: () => render() }) : null);
+  };
   engine.onTime = t => {
     time.textContent = fmtTime(t) + ' / ' + fmtTime(engine.duration);
     scrub.value = engine.duration ? Math.round(1000 * t / engine.duration) : 0;
     head.style.left = (engine.duration ? 100 * t / engine.duration : 0) + '%';
     const it = engine.itemAt(t);
     sceneLabel.textContent = it ? `Сцена ${it.scene.num} · ${Prompts.code(it.scene, it.shot)}` : '';
+    if ((it ? it.shot.id : null) !== rvShot && !(rvNow.contains(document.activeElement))) showReview(it);
   };
   engine.onEnd = () => { playBtn.textContent = '▶'; };
 
@@ -1307,8 +1342,9 @@ function renderEdit() {
     if (S.seekShot) { const it = engine.items.find(x => x.shot.id === S.seekShot); S.seekShot = null; if (it) engine.seek(it.start); }
     const total = engine.duration || 1;
     fill(strip, ...engine.items.map(it => h('div', {
-      class: 'blk ' + (it.shot.assets.video ? 'v' : it.shot.assets.image ? 'i' : Prompts.noPicture(it.shot) ? 'b' : 'n') + (it.first ? ' first' : ''),
-      style: `width:${100 * it.dur / total}%`, title: `${Prompts.code(it.scene, it.shot)} · ${it.shot.kind} · ${it.dur} с\n${(it.shot.text || '').slice(0, 100)}`,
+      class: 'blk st-' + shotState(it.shot) + (it.first ? ' first' : ''),
+      style: `width:${100 * it.dur / total}%`, title: `${Prompts.code(it.scene, it.shot)} · ${it.shot.kind} · ${it.dur} с · ${STATE_LABEL[shotState(it.shot)] || 'без картинки'}\n${(it.shot.text || '').slice(0, 100)}` +
+        shotStages(it.shot).map(st => reviewNote(it.shot, st) ? `\n📝 ${STAGE_LABEL[st]}: ${reviewNote(it.shot, st)}` : '').join(''),
       onclick: () => engine.seek(it.start) }, it.first ? h('span', {}, it.scene.num) : null)), head);
     engine.onTime(engine.t); engine.draw(engine.t);
   });
@@ -1322,7 +1358,8 @@ function renderEdit() {
     h('div', { class: 'stage' }, engine.canvas),
     h('div', { class: 'row transport' }, playBtn, time, scrub, sceneLabel),
     strip,
-    h('div', { class: 'legend muted small' }, h('i', { class: 'blk v' }), 'видео', h('i', { class: 'blk i' }), 'картинка', h('i', { class: 'blk n' }), 'карточка аниматика', h('i', { class: 'blk b' }), 'чёрный кадр / титр'),
+    h('div', { class: 'legend muted small' }, ['ok', 'fix', 'redo', 'wait', 'empty', 'none'].map(k => [h('i', { class: 'blk st-' + k }), k === 'none' ? 'чёрный кадр / титр' : STATE_LABEL[k]])),
+    rvNow,
     h('div', { class: 'grid2' },
       h('div', { class: 'card' },
         h('h3', {}, 'Что монтируем'),
@@ -1350,6 +1387,7 @@ function renderEdit() {
           btn('Промпты .md', () => download(safeName(p.name) + '_prompts.md', Prompts.markdown(p, scenes), 'text/markdown;charset=utf-8')),
           btn('Шот-лист .csv', () => download(safeName(p.name) + '_shotlist.csv', Prompts.csv(p, scenes), 'text/csv;charset=utf-8')),
           btn('Субтитры .srt', () => download(safeName(p.name) + '.srt', srt())),
+          btn('📝 Список правок .md', () => download(safeName(p.name) + '_pravki.md', reviewReport(), 'text/markdown;charset=utf-8'), '', 'Всё, что надо доработать или переделать, с заметками'),
           btn('Проект .json', () => exportProject(false)),
           btn('Бэкап с файлами', () => exportProject(true), '', 'Один .json со всеми картинками и видео — может быть большим')))));
 }

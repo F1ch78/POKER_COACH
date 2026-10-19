@@ -132,7 +132,9 @@ function renderSound() {
           btn('✕', () => { sh.sfx.splice(i, 1); touch(); render(); }, 'ghost small'))),
         soundPick('', v => { if (v) (sh.sfx = sh.sfx || []).push({ id: uid(), asset: v, at: 0, vol: 1 }); }, '＋ эффект', 'chip'))));
     return h('div', { class: 'card snd-scene' },
-      h('div', { class: 'row wrap' }, h('h3', { class: 'grow' }, `Сцена ${sc.num}. ${sc.heading}`), watch(sc)),
+      h('div', { class: 'row wrap' }, h('h3', { class: 'grow' }, `Сцена ${sc.num}. ${sc.heading}`),
+        reviewDot(sc, 'sound', () => { S.rvOpen = S.rvOpen === sc.id + ':sound' ? '' : sc.id + ':sound'; render(); }, S.rvOpen === sc.id + ':sound'), watch(sc)),
+      S.rvOpen === sc.id + ':sound' ? reviewBar(sc, 'sound', { title: 'Саунд-дизайн сцены:' }) : null,
       h('div', { class: 'row wrap' },
         h('span', {}, 'Атмосфера сцены (по кругу):'),
         soundPick(amb && amb.asset, v => { if (v) sc.ambience = { asset: v, vol: amb ? amb.vol : 1 }; else delete sc.ambience; }),
