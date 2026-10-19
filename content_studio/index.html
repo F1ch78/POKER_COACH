@@ -86,6 +86,14 @@
   .vo-scene, .snd-scene { margin-top: 14px; }
   .dev .card { margin-top: 14px; }
   .dev-step.done { border-left: 4px solid var(--st-ok); }
+  .dev-refs { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 10px; margin: 8px 0; }
+  .dev-ref { background: var(--panel2); border: 1px solid var(--line); border-radius: 10px; padding: 8px; display: grid; gap: 6px; align-content: start; min-width: 0; }
+  .dev-ref-media img, .dev-ref-media video { width: 100%; aspect-ratio: 16 / 9; object-fit: cover; border-radius: 6px; background: #000; display: block; }
+  .dev-ref-media audio { width: 100%; }
+  .dev-ref small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .dev-ref.add { border-style: dashed; min-height: 120px; place-content: center; text-align: center; cursor: pointer; color: var(--fg); }
+  .dev-timing { border-collapse: collapse; margin-top: 6px; } .dev-timing td, .dev-timing th { border-bottom: 1px solid var(--line); padding: 3px 10px; text-align: left; }
+  .dev-timing tr.off td { color: var(--st-fix); }
   .dev-msg { border-top: 1px solid var(--line); padding: 8px 0; }
   .dev-answer { white-space: pre-wrap; }
   .experts .check { margin-right: 6px; }

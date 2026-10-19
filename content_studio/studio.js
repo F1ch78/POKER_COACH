@@ -110,6 +110,7 @@ async function addAsset(file) {
 function referenced(id) {
   const p = S.p;
   if (p.music === id) return true;
+  if (p.dev && (p.dev.refs || []).some(r => r.id === id)) return true;
   const snd = p.sound || {};
   if ((snd.library || []).includes(id) || (snd.cues || []).some(c => c.asset === id)) return true;
   if (p.scenes.some(sc => (sc.ambience && sc.ambience.asset === id) || sc.shots.some(sh => (sh.sfx || []).some(fx => fx.asset === id)))) return true;
@@ -661,6 +662,7 @@ function shotCard(sc, sh, i) {
         render();
       }, Math.max(1, sh.dialogue.length), 'Реплики: ГЕРОЙ: текст   или   ГЕРОЙ (V.O.): текст за кадром') : null,
       sh.sound ? h('div', { class: 'muted small' }, '🔉 ' + sh.sound) : null,
+      sh.plate || sh.mode ? h('div', { class: 'muted small' }, [sh.plan && 'план: ' + sh.plan, sh.plate && 'плейт: ' + sh.plate, sh.mode && 'режим: ' + sh.mode].filter(Boolean).join(' · ')) : null,
       picture ? h('div', { class: 'row wrap chars' },
         p.characters.filter(c => !c.variantOf).map(c => {
           const on = chars.some(x => x === c || x.variantOf === c.id);
@@ -1091,6 +1093,7 @@ function renderConveyor() {
           h('span', {}, `${sh.kind} · ${sh.dur} с`), h('span', { class: 'grow' }),
           h('span', { class: 'muted small' }, `${i + 1} / ${q.length}`)),
         h('div', { class: 'muted small' }, `Сцена ${sc.num}. ${sc.heading}`),
+        sh.plate || sh.mode ? h('div', { class: 'small' }, [sh.plan && 'план: ' + sh.plan, sh.plate && 'плейт: ' + sh.plate, sh.mode && 'режим: ' + sh.mode].filter(Boolean).join(' · ')) : null,
         h('p', { class: 'conv-text' }, sh.text),
         sh.dialogue.length ? h('div', { class: 'conv-dialogue' }, sh.dialogue.map(d => h('div', {}, h('b', {}, d.who + (d.vo ? ' (V.O.)' : '') + ': '), d.line))) : null,
         h('div', { class: 'row wrap' }, chars.map(c => h('span', { class: 'chip on' }, c.name)), loc ? h('span', { class: 'chip' }, '📍 ' + loc.name) : h('span', { class: 'chip warnchip' }, 'локация не выбрана')),
@@ -1656,7 +1659,7 @@ function openSettings() {
 }
 
 // Запрос к ИИ вручную: копируем в Chatbox (или любой чат с Claude), ответ вставляем обратно.
-function manualRequest({ system, user, reason }) {
+function manualRequest({ system, user, reason, images }) {
   return new Promise((resolve, reject) => {
     const text = system + '\n\n---\n\n' + user;
     const answer = h('textarea', { rows: 8, placeholder: 'Вставьте сюда ответ модели целиком' });
@@ -1666,6 +1669,7 @@ function manualRequest({ system, user, reason }) {
       reason ? h('div', { class: 'warn small' }, reason, h('div', {}, 'Сделайте этот запрос через Chatbox — результат будет тот же.')) : null,
       h('ol', { class: 'small' },
         h('li', {}, 'Скопируйте запрос и вставьте его в новый чат Chatbox (лучше с моделью Claude).'),
+        images && images.length ? h('li', {}, `Приложите к сообщению в чате файлы-референсы идеи (${images.length} шт.): их список есть в запросе.`) : null,
         h('li', {}, 'Скопируйте ответ модели целиком и вставьте ниже.')),
       h('textarea', { rows: 6, readOnly: true, value: text, class: 'mono', onfocus: e => e.target.select() }),
       h('div', { class: 'row' }, btn('⧉ Скопировать запрос', () => copy(text, 'Запрос'), 'primary'), h('span', { class: 'muted small' }, `${Math.round(text.length / 1000)} тыс. знаков`)),
@@ -1741,7 +1745,7 @@ window.addEventListener('keydown', e => {
 });
 
 window.addEventListener('dragover', e => e.preventDefault());
-window.addEventListener('drop', e => { e.preventDefault(); if (!e.dataTransfer.files.length) return; if (S.tab === 'sound') soundUpload([...e.dataTransfer.files]); else importFiles([...e.dataTransfer.files]); });
+window.addEventListener('drop', e => { e.preventDefault(); if (!e.dataTransfer.files.length) return; if (S.tab === 'sound') soundUpload([...e.dataTransfer.files]); else if (S.tab === 'dev') devAttach([...e.dataTransfer.files]); else importFiles([...e.dataTransfer.files]); });
 window.addEventListener('beforeunload', () => { flush(); });
 
 (async () => {

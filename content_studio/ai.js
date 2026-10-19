@@ -93,8 +93,14 @@ const AI = (() => {
     return resp.json();
   }
 
-  function anthropicBody({ system, user, schema, maxTokens }) {
-    const body = { model: settings.model, max_tokens: maxTokens, system, messages: [{ role: 'user', content: user }] };
+  // images: [{ mime, b64 }] — картинки к запросу (референсы идеи, кадры из видео).
+  const anthropicContent = (user, images) => images && images.length
+    ? images.map(i => ({ type: 'image', source: { type: 'base64', media_type: i.mime, data: i.b64 } })).concat({ type: 'text', text: user }) : user;
+  const openaiContent = (user, images) => images && images.length
+    ? images.map(i => ({ type: 'image_url', image_url: { url: `data:${i.mime};base64,${i.b64}` } })).concat({ type: 'text', text: user }) : user;
+
+  function anthropicBody({ system, user, schema, maxTokens, images }) {
+    const body = { model: settings.model, max_tokens: maxTokens, system, messages: [{ role: 'user', content: anthropicContent(user, images) }] };
     if (direct()) {
       body.output_config = { effort: settings.effort || 'medium' };
       if (schema) body.output_config.format = { type: 'json_schema', schema };
@@ -115,31 +121,31 @@ const AI = (() => {
     return Array.isArray(c) ? c.map(x => x.text || '').join('') : (c || '');
   }
 
-  async function call({ system, user, schema, maxTokens = 16000, noManual }) {
+  async function call({ system, user, schema, maxTokens = 16000, noManual, images }) {
     // Шлюзы не всегда поддерживают структурированный ответ, поэтому формат JSON всегда дублируем в тексте.
     if (schema) user += '\n\nReturn only a JSON object matching this JSON Schema, with no other text:\n' + JSON.stringify(schema);
-    if (settings.mode === 'manual' && manual && !noManual) return parse(await manual({ system, user }), schema);
+    if (settings.mode === 'manual' && manual && !noManual) return parse(await manual({ system, user, images }), schema);
     if (!settings.apiKey) throw new Error('Укажите API-ключ в настройках (⚙) или включите режим «через Chatbox».');
     try {
-      return parse(await viaApi({ system, user, schema, maxTokens }), schema);
+      return parse(await viaApi({ system, user, schema, maxTokens, images }), schema);
     } catch (e) {
       // Браузер не достучался до сервиса (часто это запрет CORS) — предлагаем сделать этот запрос через Chatbox.
-      if (e.network && manual && !noManual) return parse(await manual({ system, user, reason: e.message }), schema);
+      if (e.network && manual && !noManual) return parse(await manual({ system, user, images, reason: e.message }), schema);
       throw e;
     }
   }
 
   // Один запрос с автоопределением формата: при отказе пробуем второй формат (Anthropic ↔ OpenAI-совместимый).
-  async function viaApi({ system, user, schema, maxTokens }) {
+  async function viaApi({ system, user, schema, maxTokens, images }) {
     const fmt = pathFormat() || (settings.apiFormat === 'auto' ? (settings.detected || (known(settings.apiKey) || {}).format || 'anthropic') : settings.apiFormat);
     let text;
     try {
-      text = await callAs(fmt, { system, user, schema, maxTokens });
+      text = await callAs(fmt, { system, user, schema, maxTokens, images });
     } catch (e) {
       const other = fmt === 'anthropic' ? 'openai' : 'anthropic';
       const switchable = settings.apiFormat === 'auto' && !settings.apiPath && !direct() && (e.network || [400, 404, 405, 415, 422].includes(e.status));
       if (!switchable) throw e;
-      try { text = await callAs(other, { system, user, schema, maxTokens }); }
+      try { text = await callAs(other, { system, user, schema, maxTokens, images }); }
       catch (e2) { throw e2.network || e2.status === 404 ? e : e2; }
       save(Object.assign({}, settings, { detected: other }));
       return text;
@@ -151,7 +157,7 @@ const AI = (() => {
   async function callAs(fmt, req) {
     if (fmt === 'openai') {
       const data = await send('openai', { model: settings.model, max_tokens: req.maxTokens,
-        messages: [{ role: 'system', content: req.system }, { role: 'user', content: req.user }] });
+        messages: [{ role: 'system', content: req.system }, { role: 'user', content: openaiContent(req.user, req.images) }] });
       return readOpenAI(data);
     }
     const body = anthropicBody(req);
