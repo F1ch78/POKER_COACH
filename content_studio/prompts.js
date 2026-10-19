@@ -24,21 +24,40 @@ const Prompts = (() => {
   }
   const camera = (scene, shot) => CAMERA[framing(scene, shot)] + (shot.kind === 'ПАУЗА' ? ', held still for the whole shot' : '');
 
-  // Какие герои в кадре: ручной выбор, иначе по упоминаниям; «Он/Она…» без имени — наследует героев предыдущего шота.
+  // Какие герои в кадре: ручной выбор, иначе разметка ИИ (при описании шотов), иначе поиск имён в тексте.
   function characters(p, scene, shot) {
     const byId = id => p.characters.find(c => c.id === id);
     let ids;
     if (Array.isArray(shot.characters)) ids = shot.characters.slice();
+    else if (Array.isArray(shot.aiCharacters)) ids = shot.aiCharacters.slice();
     else ids = autoCharacters(p, scene, shot);
     return ids.map(byId).filter(Boolean).map(c => variantFor(p, c, scene.num));
   }
 
+  // «Он/Она…» без имени — те же герои, что в ближайшем шоте сцены с именем: сначала смотрим назад
+  // (через другие «Он…» и шоты только с репликой), а у первых шотов сцены — вперёд.
+  const PRONOUN = /^(Он|Она|Оно|Они|Его|Её|Ее|Им|Ему|Ей|Их)(?=[\s,.!?…:;]|$)/;
+
+  function named(p, shot, withVO) {
+    const hay = [shot.text, shot.title].concat(shot.dialogue.filter(d => withVO || !d.vo).map(d => d.who)).join(' ');
+    return p.characters.filter(c => !c.variantOf && (c.aliases || []).some(a => a && Parser.mentions(hay, a))).map(c => c.id);
+  }
+
   function autoCharacters(p, scene, shot) {
-    const hay = [shot.text, shot.title].concat(shot.dialogue.filter(d => !d.vo).map(d => d.who)).join(' ');
-    const ids = p.characters.filter(c => !c.variantOf && (c.aliases || []).some(a => a && Parser.mentions(hay, a))).map(c => c.id);
-    if (!ids.length && /^(Он|Она|Его|Её|Ее|Они|Им|Ему|Ей)\b/.test(shot.text || '')) {
-      const i = scene.shots.indexOf(shot);
-      if (i > 0) return autoCharacters(p, scene, scene.shots[i - 1]);
+    const ids = named(p, shot);
+    if (ids.length || !PRONOUN.test(shot.text || '')) return ids;
+    // закадровый голос в шоте «Он…» — почти всегда голос того, кто в кадре
+    const own = named(p, shot, true);
+    if (own.length) return own;
+    const i = scene.shots.indexOf(shot);
+    for (let j = i - 1; j >= 0; j--) {
+      const prev = scene.shots[j], found = named(p, prev, true);
+      if (found.length) return found;
+      if (prev.text && !PRONOUN.test(prev.text)) break;
+    }
+    for (let j = i + 1; j < scene.shots.length; j++) {
+      const found = named(p, scene.shots[j], true);
+      if (found.length) return found;
     }
     return ids;
   }

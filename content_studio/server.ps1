@@ -15,7 +15,7 @@ $types = @{
   '.css' = 'text/css; charset=utf-8'; '.svg' = 'image/svg+xml'; '.png' = 'image/png'; '.md' = 'text/markdown; charset=utf-8'; '.ico' = 'image/x-icon'
 }
 # Заголовки, которые студия передаёт сервису
-$forward = @('Authorization', 'x-api-key', 'anthropic-version', 'anthropic-beta')
+$forward = @('Authorization', 'x-api-key', 'x-goog-api-key', 'anthropic-version', 'anthropic-beta')
 
 function Send-Bytes($res, [int]$status, [string]$type, [byte[]]$bytes) {
   $res.StatusCode = $status
@@ -50,7 +50,7 @@ function Invoke-Proxy($req, $res) {
   $up.Method = $req.HttpMethod
   $up.Timeout = 600000
   $up.ReadWriteTimeout = 600000
-  $up.Accept = 'application/json'
+  $up.Accept = '*/*'
   foreach ($h in $forward) { $v = $req.Headers[$h]; if ($v) { $up.Headers[$h] = $v } }
   if ($req.HasEntityBody) {
     $body = Read-Body $req.InputStream
