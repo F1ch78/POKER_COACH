@@ -136,8 +136,27 @@ function clearInterim() { if (interimEl) { interimEl.remove(); interimEl = null;
 // ================================================================ диалог
 async function handle(text) {
   if (!settings.apiKey) { sys('Сначала укажите API-ключ Claude в настройках.'); openSheet('settings'); setState('idle'); return; }
+  const vc = window.GameStats && GameStats.voiceCommand(text);
+  if (vc) return handleStatsCommand(text, vc);
   if (isTable()) return handleTour(text);
   return askCoach(text, false);
+}
+
+// ================================================================ статистика голосом: «статистика», «итоги сессии», «отчёт», «разбери сессию»
+async function handleStatsCommand(text, vc) {
+  addMsg('user', text);
+  if (vc.type === 'report') { openSheet('stats'); Speech.say('Открыл отчёт. Его можно скачать кнопкой внизу.'); afterAnswer(); return; }
+  const recs = await GameStats.records(vc.type === 'analyze' ? 'session' : vc.scope, session.data.id);
+  const sm = GameStats.summarize(recs);
+  if (vc.type === 'stats') {
+    const t = GameStats.speechSummary(sm, vc.scope === 'session' ? 'Эта сессия' : 'За всё время');
+    addMsg('bot', t); Speech.say(t);
+    if (!Speech.busy) afterAnswer();
+    return;
+  }
+  if (!sm.hands) { sys('В этой сессии ещё нет раздач для разбора.'); Speech.say('В этой сессии ещё нет раздач.'); afterAnswer(); return; }
+  sys(`Разбор сессии: ${sm.hands} раздач, ошибок ${sm.errors}`);
+  return askCoach(GameStats.coachDigest(recs, sm) + '\n\n' + GameStats.COACH_ASK, true);
 }
 
 async function askCoach(text, alreadyShown) {
@@ -217,20 +236,35 @@ async function handleTour(text) {
     d[tourKey()] = r.state;
     syncCardFromTour(r.state);
     await session.save();
-    renderTourBar();
+    GameStats.track(session, settings.scenario, r.state);
     if (r.msgs.length) sys(r.msgs.join(' · '));
 
-    if (r.needAdvice) {
+    // мои действия: записываем и сразу оцениваем по пот-оддсам
+    const heroSay = (r.heroActs || []).map(a => GameStats.heroActSpeech(a));
+    if (heroSay.length) { const t = heroSay.join(' '); sys(t); Speech.say(t); }
+
+    // моментальный расчёт: эквити, пот-оддсы, ауты — до совета тренера
+    const st = r.state;
+    const heroFolded = st.hand && st.hand.actions.some(a => a.seat === 1 && a.act === 'fold');
+    const math = r.needAdvice && !heroFolded ? GameStats.analyze(st) : null;
+    lastMath = math;
+    renderTourBar();
+    if (math) { const ln = GameStats.lineFor(math); sys(ln.text); Speech.say(ln.speech); }
+
+    if (r.needAdvice && !heroFolded) {
       const bubble = addMsg('bot', '');
       const sb = sentenceBuffer(s => { Speech.say(s); if (state !== 'speaking') setState('speaking'); });
       const t0 = performance.now();
       let first = 0;
-      const situation = E.describe(r.state) + (sngMode ? '\n' + SNG.context(r.state) : cashMode ? '\n' + CASH.context(r.state) : '');
+      const post = (st.hand.street || 'preflop') !== 'preflop';
+      const pv = GameStats.preflopView(st);
+      const situation = E.describe(st) + (post ? '' : sngMode ? '\n' + SNG.context(pv) : cashMode ? '\n' + CASH.context(pv) : '') +
+        (math ? `\nРАСЧЁТ ПРИЛОЖЕНИЯ (уже озвучен): ${GameStats.lineFor(math).text}.` : '');
       const ans = await brain.advise(situation, chunk => {
         if (!first) first = performance.now() - t0;
         bubble.textContent = (bubble.textContent + chunk).replace(/^\s+/, '');
         scrollDown(); sb.feed(chunk);
-      }, sngMode ? SNG.ADVICE_SYSTEM : cashMode ? CASH.ADVICE_SYSTEM : undefined);
+      }, post ? GameStats.POSTFLOP_ADVICE : sngMode ? SNG.ADVICE_SYSTEM : cashMode ? CASH.ADVICE_SYSTEM : undefined);
       sb.flush();
       if (!ans) bubble.remove();
       else {
@@ -241,7 +275,7 @@ async function handleTour(text) {
         t.textContent = `первое слово через ${(first / 1000).toFixed(1)} с`;
         bubble.appendChild(t);
       }
-    } else if (r.msgs.length) Speech.say(r.msgs.join('. '));
+    } else if (r.msgs.length && !heroSay.length) Speech.say(r.msgs.join('. '));
   } catch (e) {
     sys('Ошибка: ' + e.message);
   } finally {
@@ -279,13 +313,15 @@ function syncCardFromTour(st) {
 // ---------------------------------------------------------------- визуальный стол
 // Показывает ровно то состояние, которое уходит нейросети: позиции, блайнды, ставки, банк.
 // Позиции и баттон меняются только при новой раздаче (когда названы карты), ставки — по ходу раунда.
-const SUIT_RED = { s: false, o: true };
-function miniCards(code) {
-  if (!code) return '<div class="tt-wait">ждём карты</div>';
-  const r = c => c === 'T' ? '10' : c;
-  const second = code[2] === 's' ? '♠' : '♥';
-  return `<div class="tt-cards"><span class="cd">${r(code[0])}<em>♠</em></span>` +
-    `<span class="cd${second === '♥' ? ' red' : ''}">${r(code[1])}<em>${second}</em></span></div>`;
+let lastMath = null;
+const SUIT_CH = { s: '♠', h: '♥', d: '♦', c: '♣' };
+const cardHtml = (c, small) => `<span class="cd${'hd'.includes(c[1]) ? ' red' : ''}${c[1] === 'd' ? ' dia' : c[1] === 'c' ? ' clb' : ''}${small ? ' sm' : ''}">` +
+  `${c[0] === 'T' ? '10' : c[0]}<em>${SUIT_CH[c[1]]}</em></span>`;
+function miniCards(hand) {
+  if (!hand || !hand.cards) return '<div class="tt-wait">ждём карты</div>';
+  const cc = TourEngine.concreteCards(hand);
+  const board = cc.board.length ? `<div class="tt-cards tt-board">${cc.board.map(c => cardHtml(c, true)).join('')}</div>` : '';
+  return board + `<div class="tt-cards">${cc.hero.map(c => cardHtml(c)).join('')}</div>`;
 }
 
 let ttLastHand = null;
@@ -304,6 +340,7 @@ function renderTourTable() {
     bar.innerHTML = `<div class="tt-head"><span id="ttTitle"></span>
         <button id="ttNew" title="Новый Sit&Go">↺</button><button id="ttSeeBtn" title="Что видит нейросеть">👁</button><button id="ttFold" title="Свернуть">▾</button></div>
       <div class="tt"><div class="tt-felt"></div><div id="ttLayer"></div><i id="ttD">D</i></div>
+      <div id="ttMath"></div>
       <pre id="ttSee"></pre>`;
     $('#ttSeeBtn').onclick = () => { settings.tableSee = !settings.tableSee; DB.put('kv', settings, 'settings'); renderTourTable(); };
     $('#ttFold').onclick = () => { settings.tableFolded = !settings.tableFolded; DB.put('kv', settings, 'settings'); renderTourTable(); };
@@ -330,7 +367,7 @@ function renderTourTable() {
   bar.querySelector('.tt').style.display = settings.tableFolded ? 'none' : '';
   $('#ttFold').textContent = settings.tableFolded ? '▸' : '▾';
   $('#ttSee').style.display = settings.tableSee ? '' : 'none';
-  $('#ttSee').textContent = E.describe(st) + (st.sng ? '\n' + SNG.context(st) : st.cash ? '\n' + CASH.context(st) : '');
+  $('#ttSee').textContent = E.describe(st) + (st.hand && st.hand.street && st.hand.street !== 'preflop' ? '' : st.sng ? '\n' + SNG.context(GameStats.preflopView(st)) : st.cash ? '\n' + CASH.context(GameStats.preflopView(st)) : '');
   $('#ttSeeBtn').classList.toggle('on', !!settings.tableSee);
 
   const n = st.seats.length;
@@ -356,9 +393,20 @@ function renderTourTable() {
       html += `<div class="tb${blind}" style="left:${q.x}%;top:${q.y}%"><i></i>${E.fmt(bet)}</div>`;
     }
   });
-  html += `<div class="tt-mid">${miniCards(st.hand && st.hand.cards)}` +
+  html += `<div class="tt-mid">${miniCards(st.hand)}` +
     (st.hand ? `<div class="tt-pot">банк ${E.fmt(m.pot)} BB${m.toCall ? `<br><span>мне колл ${E.fmt(m.toCall)}</span>` : ''}</div>` : '') + '</div>';
   $('#ttLayer').innerHTML = html;
+  const mEl = $('#ttMath');
+  const ok = lastMath && st.hand && lastMath.street === (st.hand.street || 'preflop');
+  mEl.style.display = ok ? '' : 'none';
+  if (ok) {
+    const a = lastMath, good = a.toCall > 0 ? a.eq >= a.need : null;
+    mEl.innerHTML = `<b class="${good === true ? 'g' : good === false ? 'r' : ''}">${Math.round(a.eq * 100)}%</b><span>эквити</span>` +
+      (a.toCall > 0 ? `<b>${Math.round(a.need * 100)}%</b><span>нужно</span>` : '') +
+      (a.outs && a.outs.outs ? `<b>${a.outs.outs}</b><span>аутов · ${a.outs.hitPct}%</span>` : '') +
+      (a.made && a.made !== 'старшая карта' ? `<i>${esc(a.made)}</i>` : '') +
+      `<small>против: ${esc(a.ranges.map(r => r.label).join(', '))}</small>`;
+  }
 
   const d = $('#ttD');
   const bi = st.seats.findIndex(s => s.seat === st.buttonSeat);
@@ -579,6 +627,7 @@ function renderHeader() {
 
 // ================================================================ шторки
 function openSheet(name) {
+  if (name === 'stats') renderStats();
   if (name === 'card') renderCard();
   if (name === 'sessions') renderSessions();
   if (name === 'kb') renderKB();
@@ -613,6 +662,46 @@ function renderCard() {
   const cur = session.currentHand();
   $('#cardHand').innerHTML = cur ? kvHtml(cur, H_NAMES) : '<div>—</div><div></div>';
 }
+
+// ---------------------------------------------------------------- статистика и отчёт
+let statsScope = 'session';
+async function renderStats() {
+  const recs = await GameStats.records(statsScope, session.data.id);
+  const sm = GameStats.summarize(recs);
+  document.querySelectorAll('#statsScope button').forEach(b => b.classList.toggle('on', b.dataset.scope === statsScope));
+  const tile = (v, l) => `<div><b>${v}</b><span>${l}</span></div>`;
+  $('#statsKpi').innerHTML = tile(sm.hands, 'раздач') + tile(sm.vpip + '%', 'вход в банк') + tile(sm.pfr + '%', 'рейзы') +
+    tile(sm.allin + '%', 'олл-ины') + tile(sm.accuracy == null ? '—' : sm.accuracy + '%', `верных колл/фолд (${sm.checked})`) +
+    tile(sm.lossBB ? '−' + sm.lossBB : '0', 'BB на ошибках');
+  const pos = GameStats.POS_ORDER.filter(p => sm.byPos[p]).concat(Object.keys(sm.byPos).filter(p => !GameStats.POS_ORDER.includes(p)));
+  $('#statsPos').innerHTML = pos.length ? `<table><tr><th>Позиция</th><th>Раздач</th><th>VPIP</th><th>PFR</th></tr>` +
+    pos.map(p => { const v = sm.byPos[p]; return `<tr><td>${esc(p)}</td><td>${v.hands}</td><td>${Math.round(v.vpip / v.hands * 100)}%</td><td>${Math.round(v.pfr / v.hands * 100)}%</td></tr>`; }).join('') + '</table>'
+    : '<div class="hint">Пока нет раздач. Называйте карты и свои действия: «я колл», «я фолд».</div>';
+  const stg = Object.entries(sm.byStage);
+  $('#statsStage').innerHTML = stg.length ? `<table><tr><th>Стадия</th><th>Решений</th><th>Ошибок</th><th>BB</th></tr>` +
+    stg.map(([k, v]) => `<tr><td>${esc(k)}</td><td>${v.checked}</td><td>${v.errors}</td><td>${v.loss ? '−' + v.loss : 0}</td></tr>`).join('') + '</table>'
+    : '<div class="hint">Проверяются решения колл/фолд, когда передо мной ставка. Скажите «я колл» или «я фолд».</div>';
+  $('#statsErr').innerHTML = sm.topErrors.map(d => `<div class="item"><div class="grow">№${d.r.handNo} ${esc(d.r.pos)} ${esc(d.r.hero)}${d.r.board ? ' · ' + esc(d.r.board) : ''}` +
+    `<small>${esc(TourEngine.STREET_RU[d.street])}: ${esc(d.why)}</small></div><b class="loss">−${d.loss}</b></div>`).join('') || '<div class="hint">Ошибок не найдено.</div>';
+}
+document.querySelectorAll('#statsScope button').forEach(b => b.onclick = () => { statsScope = b.dataset.scope; renderStats(); });
+$('#statsDownload').onclick = async () => {
+  const recs = await GameStats.records(statsScope, session.data.id);
+  const sm = GameStats.summarize(recs);
+  const title = statsScope === 'session' ? `Отчёт: ${session.data.title || session.data.tournament.format || 'сессия'} ${new Date(session.data.created).toLocaleDateString('ru-RU')}` : 'Отчёт: вся статистика';
+  const blob = new Blob([GameStats.reportHtml(recs, sm, title)], { type: 'text/html' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = `poker-report-${new Date().toISOString().slice(0, 10)}.html`;
+  document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(a.href), 5000);
+};
+$('#statsCoach').onclick = () => { $('#sheet-stats').classList.remove('show'); handleStatsCommand('Разбери сессию', { type: 'analyze' }); };
+$('#statsClear').onclick = async () => {
+  const b = $('#statsClear');
+  if (!b.dataset.armed) { b.dataset.armed = '1'; b.textContent = 'Точно удалить всю статистику?'; setTimeout(() => { delete b.dataset.armed; b.textContent = 'Очистить статистику'; }, 4000); return; }
+  await GameStats.clearAll(); delete b.dataset.armed; b.textContent = 'Очистить статистику'; renderStats();
+};
 
 async function renderSessions() {
   const list = await Session.list();
