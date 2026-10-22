@@ -100,10 +100,49 @@ function parseCards(seg) {
   }
   if (ranks.length === 1 && pairFlag) ranks = [ranks[0], ranks[0]];
   if (ranks.length !== 2) return null;
+  // точные масти: «туз пик король червей»
+  const named = cardsWithSuits(seg);
+  let exact = null;
+  if (named.length === 2 && named.every(c => c.s && c.s !== "my")) {
+    named.sort((a, b) => RANK_ORDER.indexOf(a.r) - RANK_ORDER.indexOf(b.r));
+    if (named[0].r + named[0].s !== named[1].r + named[1].s) {
+      exact = named[0].r + named[0].s + named[1].r + named[1].s;
+      if (named[0].r !== named[1].r) suit = named[0].s === named[1].s ? "s" : "o";
+    }
+  }
   ranks.sort((a, b) => RANK_ORDER.indexOf(a) - RANK_ORDER.indexOf(b));
-  if (ranks[0] === ranks[1]) return { code: ranks[0] + ranks[1], suitGuessed: false };
+  if (ranks[0] === ranks[1]) return { code: ranks[0] + ranks[1], suitGuessed: false, exact };
   const guessed = suit === null;
-  return { code: ranks[0] + ranks[1] + (suit || "o"), suitGuessed: guessed };
+  return { code: ranks[0] + ranks[1] + (suit || "o"), suitGuessed: guessed, exact };
+}
+
+// ---------- карты с мастями (борд и точные карты героя) ----------
+function suitOf(word, next) {
+  const w = word.replace(/[^а-яa-z]/g, "");
+  if (/^пик|^пики|^пиков/.test(w)) return "s";
+  if (/^черв|^черен/.test(w)) return "h";
+  if (/^бубн|^бубен|^буб$/.test(w)) return "d";
+  if (/^треф|^крест/.test(w)) return "c";
+  if (/^(мое|моей|мою|моя)$/.test(w) && next && /^маст/.test(next)) return "my";
+  return null;
+}
+// «туз червей семь пик двойка» → [{r:"A",s:"h"},{r:"7",s:"s"},{r:"2",s:null}]
+function cardsWithSuits(seg) {
+  const out = [];
+  const lat = seg.replace(/10/g, "t").match(/(?:^|\s)((?:[akqjt2-9][shdc]){1,5})(?=\s|$)/i);
+  if (lat) {
+    for (let i = 0; i < lat[1].length; i += 2) out.push({ r: lat[1][i].toUpperCase(), s: lat[1][i + 1].toLowerCase() });
+    return out;
+  }
+  const words = seg.split(/[\s,.\-–]+/).filter(Boolean);
+  for (let i = 0; i < words.length; i++) {
+    const su = suitOf(words[i], words[i + 1]);
+    if (su) { const last = out[out.length - 1]; if (last && !last.s) last.s = su; continue; }
+    if (/^маст/.test(words[i])) continue;
+    const r = rankOf(words[i]);
+    if (r) out.push({ r, s: null });
+  }
+  return out;
 }
 
 // ---------- позиция по словам ----------
@@ -215,6 +254,14 @@ function parseSegment(seg) {
   { const m = s.match(/(?:баттон|батон|кнопк\S*|дилер)\s+(?:у|на)\s+игрок\S*\s+(\d+|\S+)/);
     if (m) { const v = +m[1] || WORD_NUM[m[1]]; if (v) cmds.push({ type: "button", seat: v }); return cmds; } }
 
+  // мои действия: «я колл», «я рейз 3», «я пуш», «я чек», «я фолд», «я ставка 4»
+  { const m = s.match(/(?:^|\s)я\s+(.*)/);
+    if (m && !/^(на|в|во|сижу|сейчас|вылетел)\s/.test(m[1] + " ")) {
+      const act = actOf(m[1]);
+      if (act) return [{ type: "act", seat: 1, act, amount: numbersIn(m[1])[0] || null }];
+    }
+  }
+
   // моя позиция
   if (/(?:(?<![а-яa-z0-9])(?=[а-яa-z0-9])|(?<=[а-яa-z0-9])(?![а-яa-z0-9]))я\s+(на|в|сижу|сейчас)|моя позици|позиция\s/.test(s)) {
     const pos = parsePosition(s); if (pos) cmds.push({ type: "myPos", pos });
@@ -235,12 +282,7 @@ function parseSegment(seg) {
       if (seat) {
         const amt = numbersIn(rest)[0];
         if (/вылетел|выбыл|вышел|ушел|вылет/.test(rest)) cmds.push({ type: "out", seat });
-        else if (/(?<![к])олл|ол ин|ол-ин|all|ва-?банк|пуш|вс[её](?:(?<![а-яa-z0-9])(?=[а-яa-z0-9])|(?<=[а-яa-z0-9])(?![а-яa-z0-9]))|на все/.test(rest)) cmds.push({ type: "act", seat, act: "allin", amount: amt || null });
-        else if (/рейз|повыс|поднял|опен|ставк|бет/.test(rest)) cmds.push({ type: "act", seat, act: "raise", amount: amt || null });
-        else if (/колл|(?:(?<![а-яa-z0-9])(?=[а-яa-z0-9])|(?<=[а-яa-z0-9])(?![а-яa-z0-9]))кол(?:(?<![а-яa-z0-9])(?=[а-яa-z0-9])|(?<=[а-яa-z0-9])(?![а-яa-z0-9]))|уравн|заколл/.test(rest)) cmds.push({ type: "act", seat, act: "call", amount: amt || null });
-        else if (/лимп|докин|доставил/.test(rest)) cmds.push({ type: "act", seat, act: "limp", amount: null });
-        else if (/фолд|сброс|пас(?:(?<![а-яa-z0-9])(?=[а-яa-z0-9])|(?<=[а-яa-z0-9])(?![а-яa-z0-9]))|скинул|сбросил/.test(rest)) cmds.push({ type: "act", seat, act: "fold", amount: null });
-        else if (/чек/.test(rest)) cmds.push({ type: "act", seat, act: "check", amount: null });
+        else { const act = actOf(rest); if (act) cmds.push({ type: "act", seat, act, amount: act === "fold" || act === "check" || act === "limp" ? null : amt || null }); }
       }
     }
   }
@@ -251,15 +293,45 @@ function parseSegment(seg) {
 
   // карты — только если в сегменте нет командных слов
   const c = parseCards(s);
-  if (c) return [{ type: "hand", cards: c.code, suitGuessed: c.suitGuessed }];
+  if (c) return [{ type: "hand", cards: c.code, suitGuessed: c.suitGuessed, ...(c.exact ? { exact: c.exact } : {}) }];
   return [];
+}
+
+const WB = "(?:(?<![а-яa-z0-9])(?=[а-яa-z0-9])|(?<=[а-яa-z0-9])(?![а-яa-z0-9]))";
+function actOf(rest) {
+  if (new RegExp("(?<![к])олл|ол ин|ол-ин|all|ва-?банк|пуш|вс[её]" + WB + "|на все").test(rest)) return "allin";
+  if (/рейз|повыс|поднял|опен|ставк|бет|поставил/.test(rest)) return "raise";
+  if (new RegExp("колл|" + WB + "кол" + WB + "|уравн|заколл").test(rest)) return "call";
+  if (/лимп|докин|доставил/.test(rest)) return "limp";
+  if (new RegExp("фолд|сброс|пас" + WB + "|скинул|сбросил").test(rest)) return "fold";
+  if (/чек/.test(rest)) return "check";
+  return null;
+}
+
+// борд: «флоп туз червей семь двойка», «тёрн король», «ривер пятёрка пик» (запятые внутри разрешены)
+const STREET_WORD = /(?:^|\s)(флоп|flop|терн|turn|ривер|river)\s+/;
+function extractBoard(t) {
+  const cmds = [];
+  let m;
+  while ((m = t.match(STREET_WORD))) {
+    const start = m.index;
+    const after = t.slice(start + m[0].length);
+    const stop = after.search(/(?:^|[\s,.;!?])(?:игрок|у игрока|я\s|флоп|flop|терн|turn|ривер|river|банк|у меня)|[.;!?]/);
+    const body = stop < 0 ? after : after.slice(0, stop);
+    const street = /флоп|flop/.test(m[1]) ? "flop" : /терн|turn/.test(m[1]) ? "turn" : "river";
+    cmds.push({ type: "board", street, cards: cardsWithSuits(body) });
+    t = t.slice(0, start) + " , " + (stop < 0 ? "" : after.slice(stop));
+  }
+  return { t, cmds };
 }
 
 function sortCommands(commands) {
   // порядок применения: сброс/отмена, стол, позиция, прочее, раздача, действия
   const rank = { reset: 0, undo: 0, reseat: 1, table: 1, tournament: 2, blinds: 2, ante: 2,
-    myPos: 3, button: 3, stack: 4, out: 4, hand: 5, act: 6 };
-  commands.sort((a, b) => (rank[a.type] ?? 9) - (rank[b.type] ?? 9));
+    myPos: 3, button: 3, stack: 4, out: 4, hand: 5, act: 6, board: 6 };
+  // действия и улицы идут в порядке, в котором их назвали
+  commands.forEach((c, i) => { c._i = c._i ?? i; });
+  commands.sort((a, b) => ((rank[a.type] ?? 9) - (rank[b.type] ?? 9)) || (a._i - b._i));
   // «пересадили, за столом 3» → одна команда пересадки
   const rs = commands.find(c => c.type === "reseat"), tb = commands.find(c => c.type === "table");
   if (rs && tb) { rs.size = rs.size || tb.size; commands.splice(commands.indexOf(tb), 1); }
@@ -267,9 +339,10 @@ function sortCommands(commands) {
 }
 
 function parsePhrase(text) {
-  const t = normalize(text);
+  const b = extractBoard(normalize(text));
+  const t = b.t;
   const segs = splitSegments(t);
-  const commands = [], unknown = [];
+  const commands = [...b.cmds], unknown = [];
   for (const seg of segs) {
     const c = parseSegment(seg);
     if (c.length) commands.push(...c); else unknown.push(seg);
@@ -286,7 +359,8 @@ function makeSeats(n, keepMyStack) {
 function applyCommands(state, commands) {
   let st = clone(state);
   const msgs = [];
-  let newHand = false, actionsChanged = false;
+  let newHand = false, actionsChanged = false, newStreet = false;
+  const heroActs = [];
 
   for (const c of commands) {
     switch (c.type) {
@@ -328,57 +402,143 @@ function applyCommands(state, commands) {
         if (st.firstHandPending) st.firstHandPending = false;
         else st.buttonSeat = nextAliveAfter(st, st.buttonSeat);
         st.handNo += 1;
-        st.hand = { cards: c.cards, actions: [], seatsAtStart: aliveSeats(st) };
+        st.hand = { cards: c.cards, exact: c.exact || null, actions: [], seatsAtStart: aliveSeats(st), street: "preflop", board: [] };
         newHand = true;
-        msgs.push(`Раздача ${st.handNo}: ${c.cards}${c.suitGuessed ? " (масть не названа — считаю разномастными)" : ""}`);
+        msgs.push(`Раздача ${st.handNo}: ${c.exact || c.cards}${c.suitGuessed ? " (масть не названа — считаю разномастными)" : ""}`);
         break;
       }
-      case "act":
+      case "act": {
         if (!st.hand) { msgs.push("Действие без раздачи — сначала назовите карты"); break; }
         if (!st.seats[c.seat - 1]) { msgs.push(`Игрока ${c.seat} нет за столом`); break; }
-        st.hand.actions.push({ seat: c.seat, act: c.act, amount: c.amount });
-        if (c.act === "allin" && c.amount) st.seats[c.seat - 1].stack = c.amount;
-        actionsChanged = true;
+        const street = st.hand.street || "preflop";
+        const a = { seat: c.seat, act: c.act, amount: c.amount, street };
+        // момент моего решения: снимок расчёта до действия (для статистики и разбора)
+        if (c.seat === 1 && hooks.onHeroAct) { try { Object.assign(a, hooks.onHeroAct(st, a)); } catch (e) {} }
+        st.hand.actions.push(a);
+        if (c.act === "allin" && c.amount && street === "preflop") st.seats[c.seat - 1].stack = c.amount;
+        if (c.seat === 1) heroActs.push(a); else actionsChanged = true;
         break;
+      }
+      case "board": {
+        if (!st.hand) { msgs.push("Борд без раздачи — сначала назовите карты"); break; }
+        const need = { flop: 3, turn: 1, river: 1 }[c.street];
+        const cards = c.cards.slice(0, need);
+        if (cards.length < need) { msgs.push(`Не расслышал карты ${STREET_RU[c.street]}а — повторите`); break; }
+        const keep = { flop: 0, turn: 3, river: 4 }[c.street];
+        if ((st.hand.board || []).length < keep) { msgs.push(`Сначала назовите ${keep === 3 ? "флоп" : "тёрн"}`); break; }
+        st.hand.board = [...(st.hand.board || []).slice(0, keep), ...cards];
+        st.hand.street = c.street;
+        newStreet = true;
+        msgs.push(`${STREET_RU[c.street][0].toUpperCase() + STREET_RU[c.street].slice(1)}: ${cards.map(x => x.r + (x.s && x.s !== "my" ? SUIT_SIGN[x.s] : "")).join(" ")}`);
+        break;
+      }
     }
   }
-  return { state: st, msgs, needAdvice: (newHand || actionsChanged) && !!st.hand };
+  return { state: st, msgs, heroActs, needAdvice: (newHand || actionsChanged || newStreet) && !!st.hand };
 }
+const STREET_RU = { preflop: "префлоп", flop: "флоп", turn: "тёрн", river: "ривер" };
+const SUIT_SIGN = { s: "♠", h: "♥", d: "♦", c: "♣" };
+const hooks = {};
+
+// конкретные карты героя и борда; неназванные масти подбираются так, чтобы не было лишних флеш-дро
+function concreteCards(hand) {
+  if (!hand) return { hero: [], board: [] };
+  const board = hand.board || [];
+  const taken = new Set(board.filter(c => c.s && c.s !== "my").map(c => c.r + c.s));
+  let hero;
+  if (hand.exact) hero = [hand.exact.slice(0, 2), hand.exact.slice(2, 4)];
+  else {
+    const [r1, r2, t] = hand.cards;
+    const opts = [];
+    const S = "hsdc";
+    if (r1 === r2) { for (const a of S) for (const b of S) if (a < b) opts.push([r1 + a, r2 + b]); }
+    else if (t === "s") { for (const a of S) opts.push([r1 + a, r2 + a]); }
+    else { for (const a of S) for (const b of S) if (a !== b) opts.push([r1 + a, r2 + b]); }
+    hero = opts.find(o => !o.some(c => taken.has(c))) || opts[0];
+  }
+  const used = new Set([...hero, ...taken]);
+  const heroSuits = hero.map(c => c[1]);
+  const out = [];
+  const seenSuits = [];
+  for (const c of board) {
+    let s = c.s;
+    if (s === "my") s = heroSuits[0];
+    if (!s || hero.includes(c.r + s) || (!c.s && used.has(c.r + s)) || (c.s === "my" && used.has(c.r + s))) {
+      // сначала масти, которых нет ни у меня, ни на борде, — радуга
+      const pref = [..."cdsh"].sort((a, b) => (heroSuits.includes(a) + seenSuits.filter(x => x === a).length) - (heroSuits.includes(b) + seenSuits.filter(x => x === b).length));
+      s = pref.find(x => !used.has(c.r + x)) || s;
+    }
+    if (c.s === "my" && used.has(c.r + s) && !taken.has(c.r + s)) { /* моя масть занята — оставляем подбор выше */ }
+    used.add(c.r + s); seenSuits.push(s);
+    out.push(c.r + s);
+  }
+  return { hero, board: out };
+}
+const cardSign = (c) => (c[0] === "T" ? "10" : c[0]) + SUIT_SIGN[c[1]];
 
 // ---------- фишки на столе: всё в больших блайндах ----------
 // МБ = 0.5, ББ = 1. Анте — общая сумма в банке в BB. «Рейз 3» — рейз до 3 BB, «олл-ин» — весь стек.
 const fmt = (v) => (v == null ? "—" : String(Math.round(v * 10) / 10));
 
+const STREETS = ["preflop", "flop", "turn", "river"];
 function tableMoney(st) {
-  const res = { bets: {}, pot: 0, antes: 0, toCall: 0, high: 0, folded: {}, sbSeat: null, bbSeat: null };
+  const res = { bets: {}, pot: 0, antes: 0, toCall: 0, high: 0, folded: {}, sbSeat: null, bbSeat: null,
+    committed: {}, street: "preflop", left: {} };
   if (!st.hand || st.buttonSeat == null) return res;
   const p = positions(st);
   for (const [seat, pos] of Object.entries(p.bySeat)) {
     if (pos === "SB" || pos === "BTN/SB") res.sbSeat = +seat;
     if (pos === "BB") res.bbSeat = +seat;
   }
+  const cur = st.hand.street || "preflop";
+  res.street = cur;
   const stackOf = (s) => st.seats[s - 1] ? st.seats[s - 1].stack : null;
-  const cap = (s, v) => { const k = stackOf(s); return k != null ? Math.min(v, k) : v; };
-  if (res.sbSeat) res.bets[res.sbSeat] = cap(res.sbSeat, 0.5);
-  if (res.bbSeat) res.bets[res.bbSeat] = cap(res.bbSeat, 1);
-  let high = 1;
-  for (const a of st.hand.actions) {
-    const cur = res.bets[a.seat] || 0;
-    if (a.act === "fold") { res.folded[a.seat] = true; continue; }
-    if (a.act === "check") continue;
-    let v = cur;
-    if (a.act === "raise") v = a.amount || high * 2;
-    else if (a.act === "call") v = a.amount || high;
-    else if (a.act === "limp") v = 1;
-    else if (a.act === "allin") v = a.amount || stackOf(a.seat) || high;
-    v = cap(a.seat, Math.max(v, cur));
-    res.bets[a.seat] = v;
-    if (v > high) high = v;
+  const committed = {};
+  const leftOf = (s) => { const k = stackOf(s); return k != null ? Math.max(0, k - (committed[s] || 0)) : null; };
+  // постфлоп: кто не вошёл в банк префлоп (и не назван), считается сбросившим; ББ в лимп-банке остаётся
+  if (cur !== "preflop") {
+    const pre = st.hand.actions.filter(a => (a.street || "preflop") === "preflop");
+    const preHigh = Math.max(1, ...pre.filter(a => a.act !== "fold" && a.act !== "check").map(a => a.amount || (a.act === "limp" ? 1 : 2)));
+    for (const s of handSeats(st)) {
+      if (s === 1 || pre.some(a => a.seat === s)) continue;
+      if (s === res.bbSeat && preHigh <= 1) continue;
+      res.folded[s] = true;
+    }
   }
-  res.high = high;
+  for (const street of STREETS.slice(0, STREETS.indexOf(cur) + 1)) {
+    const bets = {};
+    const cap = (s, v) => { const k = leftOf(s); return k != null ? Math.min(v, k) : v; };
+    let high = 0;
+    if (street === "preflop") {
+      if (res.sbSeat) bets[res.sbSeat] = cap(res.sbSeat, 0.5);
+      if (res.bbSeat) bets[res.bbSeat] = cap(res.bbSeat, 1);
+      high = 1;
+    }
+    for (const a of st.hand.actions) {
+      if ((a.street || "preflop") !== street) continue;
+      const was = bets[a.seat] || 0;
+      if (a.act === "fold") { res.folded[a.seat] = true; continue; }
+      if (a.act === "check") continue;
+      let v = was;
+      if (a.act === "raise") v = a.amount || (high ? high * 2 : 1);
+      else if (a.act === "call") v = a.amount || high;
+      else if (a.act === "limp") v = 1;
+      else if (a.act === "allin") v = leftOf(a.seat) != null ? leftOf(a.seat) + was
+        : a.amount ? a.amount : Math.max(high, leftOf(1) != null ? leftOf(1) + (bets[1] || 0) : high);  // стек неизвестен — считаю, что он меня покрывает
+      v = cap(a.seat, Math.max(v, was));
+      bets[a.seat] = v;
+      if (v > high) high = v;
+    }
+    if (street === cur) { res.bets = bets; res.high = high; }
+    else for (const [s, v] of Object.entries(bets)) committed[s] = (committed[s] || 0) + v;
+  }
+  for (const [s, v] of Object.entries(res.bets)) res.committed[s] = (committed[s] || 0) + v;
+  for (const [s, v] of Object.entries(committed)) if (!(s in res.committed)) res.committed[s] = v;
+  for (const s of handSeats(st)) { const k = stackOf(s); if (k != null) res.left[s] = Math.max(0, Math.round((k - (res.committed[s] || 0)) * 100) / 100); }
   res.antes = st.ante || 0;
-  res.pot = Math.round((res.antes + Object.values(res.bets).reduce((x, y) => x + y, 0)) * 100) / 100;
-  res.toCall = Math.max(0, high - (res.bets[1] || 0));
+  res.pot = Math.round((res.antes + Object.values(res.committed).reduce((x, y) => x + y, 0)) * 100) / 100;
+  res.toCall = Math.max(0, res.high - (res.bets[1] || 0));
+  if (res.left[1] != null) res.toCall = Math.min(res.toCall, res.left[1]);
   return res;
 }
 
@@ -393,20 +553,28 @@ function describe(st) {
   lines.push(`За столом в раздаче: ${handSeats(st).length}.`);
   lines.push("Все стеки и ставки — в больших блайндах (BB). МБ 0.5, ББ 1." + (st.ante ? ` Анте в банке: ${fmt(st.ante)} BB.` : " Анте нет.") +
     (st.blinds ? ` Уровень блайндов ${st.blinds.sb}/${st.blinds.bb}.` : ""));
+  const street = st.hand ? st.hand.street || "preflop" : "preflop";
   if (st.hand) {
-    lines.push(`Раздача №${st.handNo}. Мои карты: ${st.hand.cards}.`);
-    lines.push(`Банк сейчас: ${fmt(m.pot)} BB. Максимальная ставка: ${fmt(m.high)} BB. Мне доставить до колла: ${fmt(m.toCall)} BB.`);
+    const cc = concreteCards(st.hand);
+    lines.push(`Раздача №${st.handNo}. Мои карты: ${st.hand.cards}${cc.hero.length ? ` (${cc.hero.join(" ")})` : ""}.`);
+    if (street !== "preflop") {
+      lines.push(`Улица: ${STREET_RU[street]}. Борд: ${cc.board.join(" ")}.`);
+      const prev = st.hand.actions.filter(a => a.street !== street);
+      if (prev.length) lines.push("Действия на прошлых улицах: " + prev.map(a => `${STREET_RU[a.street || "preflop"]} — ${a.seat === 1 ? "я" : "игрок " + a.seat} ${ACT_RU[a.act]}${a.amount ? " " + fmt(a.amount) : ""}`).join("; ") + ".");
+    }
+    lines.push(`Банк сейчас: ${fmt(m.pot)} BB. Максимальная ставка на этой улице: ${fmt(m.high)} BB. Мне доставить до колла: ${fmt(m.toCall)} BB.`);
   }
-  lines.push("Порядок хода префлоп:");
+  lines.push(street === "preflop" ? "Порядок хода префлоп:" : `Игроки (ставки — на улице ${STREET_RU[street]}):`);
   const acted = {};
-  if (st.hand) for (const a of st.hand.actions) acted[a.seat] = a;
+  if (st.hand) for (const a of st.hand.actions) if ((a.street || "preflop") === street) acted[a.seat] = a;
   for (const seat of p.order) {
     const s = st.seats[seat - 1];
     const who = seat === 1 ? "Я (игрок 1)" : `Игрок ${seat}`;
-    const stack = s.stack != null ? `стек ${fmt(s.stack)} BB` : "стек неизвестен";
+    if (street !== "preflop" && m.folded[seat]) continue;
+    const stack = m.left[seat] != null && street !== "preflop" ? `осталось ${fmt(m.left[seat])} BB` : s.stack != null ? `стек ${fmt(s.stack)} BB` : "стек неизвестен";
     const bet = m.bets[seat] ? `, в банке ${fmt(m.bets[seat])} BB` : "";
     const a = acted[seat];
-    const act = seat === 1 ? "← МОЙ ХОД" : m.folded[seat] ? "фолд" : a ? `${ACT_RU[a.act]}${a.amount ? " " + fmt(a.amount) + " BB" : ""}` : "действие не названо";
+    const act = seat === 1 ? (a ? `${ACT_RU[a.act]}${a.amount ? " " + fmt(a.amount) + " BB" : ""} (моё действие)` : "← МОЙ ХОД") : m.folded[seat] ? "фолд" : a ? `${ACT_RU[a.act]}${a.amount ? " " + fmt(a.amount) + " BB" : ""}` : "действие не названо";
     lines.push(`- ${p.bySeat[seat]}: ${who}, ${stack}${bet}, ${act}`);
   }
   return lines.join("\n");
@@ -414,7 +582,7 @@ function describe(st) {
 
 
 const ADVICE_SYSTEM = `Ты тренер по турнирному покеру (MTT, Spin&Go, SNG), игра на виртуальные фишки, цель — обучение.
-Тебе дают точное состояние стола префлоп: позиции, стеки и ставки в больших блайндах (BB), действия соперников. Ответ будет озвучен голосом:
+Тебе дают точное состояние стола (префлоп или постфлоп с бордом): позиции, стеки и ставки в больших блайндах (BB), действия соперников. Ответ будет озвучен голосом:
 - по-русски, 1–2 коротких предложения, без списков, звёздочек и символов;
 - начинай с действия: «Фолд», «Колл», «Рейз до …», «Олл-ин», «Чек»;
 - размер рейза называй в BB («рейз до двух с половиной»);
@@ -427,12 +595,13 @@ const PARSE_SYSTEM = `Преобразуй фразу игрока о покер
 Текст получен распознаванием речи и может содержать ошибки. Игрок 1 — говорящий, остальные пронумерованы по часовой.
 Все стеки и ставки — в больших блайндах (BB), бывают дробные: 2.5. Анте — общая сумма в банке в BB.
 {"type":"hand","cards":"AKs"} — новые карты (пары "99", одномастные s, разномастные o)
-{"type":"act","seat":N,"act":"fold|call|raise|allin|limp|check","amount":BB или null}
+{"type":"act","seat":N,"act":"fold|call|raise|allin|limp|check","amount":BB или null}   (seat 1 — это «я»; ставка/бет — raise)
+{"type":"board","street":"flop|turn|river","cards":[{"r":"A","s":"h"},{"r":"7","s":null}]} — карты борда (r: AKQJT98765432, s: s h d c или null)
 {"type":"stack","seat":N,"value":BB}   {"type":"out","seat":N}
 {"type":"ante","value":BB}
 {"type":"table","size":N}   {"type":"tournament","left":N}
 {"type":"myPos","pos":"BTN|SB|BB|UTG|UTG+1|UTG+2|LJ|HJ|CO"}   {"type":"button","seat":N}
 Если это вопрос или фраза не про состояние стола — верни [].`;
 
-window.TourEngine = { fmt, tableMoney, initialState, parsePhrase, sortCommands, applyCommands, positions, describe, ACT_RU, POS_RU, ADVICE_SYSTEM, PARSE_SYSTEM };
+window.TourEngine = { fmt, tableMoney, concreteCards, cardSign, hooks, STREET_RU, handSeats, initialState, parsePhrase, sortCommands, applyCommands, positions, describe, ACT_RU, POS_RU, ADVICE_SYSTEM, PARSE_SYSTEM };
 })();
