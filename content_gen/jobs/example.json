@@ -1,0 +1,22 @@
+{
+  "defaults": {"provider": "replicate", "aspect_ratio": "9:16"},
+  "jobs": [
+    {
+      "name": "promo_cover",
+      "kind": "image",
+      "count": 2,
+      "prompt": "Cinematic close-up of a poker table at night, a smartphone lying next to chips showing a glowing voice-assistant waveform, warm rim light, shallow depth of field, photorealistic, no text"
+    },
+    {
+      "name": "spin_gold_banner",
+      "kind": "image",
+      "aspect_ratio": "16:9",
+      "prompt": "Golden roulette-style lottery wheel with multipliers spinning above a green felt poker table, three players' silhouettes, dramatic lighting, premium casino style, no text"
+    },
+    {
+      "name": "promo_clip",
+      "kind": "video",
+      "prompt": "Slow dolly-in over a poker table, a player whispers to a phone, the phone answers with a glowing waveform, chips are pushed all-in, cinematic, 24fps"
+    }
+  ]
+}

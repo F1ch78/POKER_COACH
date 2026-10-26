@@ -1,0 +1,2 @@
+content_gen/output/*
+!content_gen/output/.gitkeep

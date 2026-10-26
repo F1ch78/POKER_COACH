@@ -1,0 +1,110 @@
+name: Генерация изображений и видео
+
+on:
+  workflow_dispatch:
+    inputs:
+      prompt:
+        description: "Промпт (пусто — взять задания из jobs_file)"
+        required: false
+        default: ""
+      kind:
+        description: "Что генерировать"
+        type: choice
+        options: [image, video]
+        default: image
+      provider:
+        description: "Провайдер (openai — только изображения)"
+        type: choice
+        options: [replicate, openai]
+        default: replicate
+      model:
+        description: "Модель (пусто — по умолчанию: flux-schnell / minimax video-01 / gpt-image-1)"
+        required: false
+        default: ""
+      aspect_ratio:
+        description: "Соотношение сторон"
+        type: choice
+        options: ["1:1", "9:16", "16:9", "3:2", "2:3"]
+        default: "9:16"
+      count:
+        description: "Сколько вариантов (для изображений)"
+        default: "1"
+      jobs_file:
+        description: "Файл заданий, если промпт пустой"
+        default: content_gen/jobs/example.json
+  push:
+    branches: [main]
+    paths:
+      - "content_gen/jobs/**.json"
+
+concurrency:
+  group: content-gen-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  generate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Генерация
+        env:
+          REPLICATE_API_TOKEN: ${{ secrets.REPLICATE_API_TOKEN }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          EVENT: ${{ github.event_name }}
+          BEFORE: ${{ github.event.before }}
+          IN_PROMPT: ${{ inputs.prompt }}
+          IN_KIND: ${{ inputs.kind }}
+          IN_PROVIDER: ${{ inputs.provider }}
+          IN_MODEL: ${{ inputs.model }}
+          IN_ASPECT: ${{ inputs.aspect_ratio }}
+          IN_COUNT: ${{ inputs.count }}
+          IN_JOBS_FILE: ${{ inputs.jobs_file }}
+        run: |
+          set -euo pipefail
+          args=(--run-id "run-${GITHUB_RUN_NUMBER}")
+          if [ "$EVENT" = "push" ]; then
+            # только изменённые/новые файлы заданий; на первом пуше ветки — все
+            if [ -z "$BEFORE" ] || [ "$BEFORE" = "0000000000000000000000000000000000000000" ]; then
+              mapfile -t files < <(ls content_gen/jobs/*.json)
+            else
+              mapfile -t files < <(git diff --name-only --diff-filter=AM "$BEFORE" "$GITHUB_SHA" -- 'content_gen/jobs/*.json')
+            fi
+            [ ${#files[@]} -eq 0 ] && { echo "нет изменённых заданий"; exit 0; }
+            args+=("${files[@]}")
+          elif [ -n "$IN_PROMPT" ]; then
+            args+=(--prompt "$IN_PROMPT" --kind "$IN_KIND" --provider "$IN_PROVIDER"
+                   --aspect-ratio "$IN_ASPECT" --count "$IN_COUNT")
+            [ -n "$IN_MODEL" ] && args+=(--model "$IN_MODEL")
+          else
+            args+=("$IN_JOBS_FILE")
+          fi
+          python content_gen/generate.py "${args[@]}"
+
+      - name: Сводка
+        if: always()
+        run: |
+          m=$(ls content_gen/output/run-*/manifest.json 2>/dev/null | head -1) || true
+          [ -z "$m" ] && exit 0
+          python - "$m" >> "$GITHUB_STEP_SUMMARY" <<'PY'
+          import json, sys
+          print("| Задание | Тип | Модель | Файлы |\n|---|---|---|---|")
+          for e in json.load(open(sys.argv[1], encoding="utf-8")):
+              files = ", ".join(e.get("files", [])) or "❌ " + e.get("error", "")[:120]
+              print(f"| {e['name']} | {e['kind']} | {e['provider']}:{e['model']} | {files} |")
+          PY
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: content-run-${{ github.run_number }}
+          path: content_gen/output/run-*/
+          if-no-files-found: ignore
+          retention-days: 30
